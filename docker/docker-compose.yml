@@ -1,0 +1,68 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # GROBID service for scientific document parsing
+  grobid:
+    image: lfoppiano/grobid:0.7.3
+    container_name: pdf_extractor_grobid
+    ports:
+      - "8070:8070"
+    volumes:
+      - grobid-home:/opt/grobid/grobid-home
+    environment:
+      - JAVA_OPTS=-Xmx4g
+    restart: unless-stopped
+    networks:
+      - scholarai-network
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: pdf_extractor_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - pdf_extractor_network
+    command: redis-server --appendonly yes
+
+  # PostgreSQL for storing extraction results (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: pdf_extractor_postgres
+    environment:
+      POSTGRES_DB: pdf_extractor
+      POSTGRES_USER: pdf_user
+      POSTGRES_PASSWORD: pdf_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - pdf_extractor_network
+
+# PDFFigures2 service for figure extraction (optional)
+# Uncomment if you want to build PDFFigures2 from source
+# pdffigures2:
+#   build:
+#     context: .
+#     dockerfile: Dockerfile.pdffigures2
+#   container_name: pdf_extractor_pdffigures2
+#   volumes:
+#     - ./paper:/app/paper
+#   working_dir: /app
+#   networks:
+#     - pdf_extractor_network
+
+volumes:
+  grobid-home:
+  redis-data:
+  postgres-data:
+
+networks:
+  pdf_extractor_network:
+    driver: bridge

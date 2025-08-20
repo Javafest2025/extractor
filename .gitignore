@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+
+# Project specific
+paper/*.pdf
+paper/uploads/
+paper/results/
+paper/figures/
+paper/tables/
+paper/code/
+paper/ocr_math/
+paper/*_extraction.json
+paper/*_summary.txt
+logs/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~
+
+# Large files
+*.jar
+pdffigures2.jar
+models/
+
+# Test files
+test_*.pdf
+sample_*.pdf
+
+# Cache
+.cache/
+__pycache__/
+*.pyc
+
+# OS
+Thumbs.db
+.DS_Store
+._.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
