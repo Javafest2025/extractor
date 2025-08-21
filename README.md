@@ -8,6 +8,7 @@ A robust, multi-method PDF extraction system designed to achieve near 100% extra
 - **Comprehensive Content Types**: Extracts text, figures, tables, equations, code blocks, references, and named entities
 - **High Accuracy**: Multiple extraction methods with intelligent fallback strategies
 - **OCR Support**: Automatic detection and processing of scanned PDFs
+- **Cloud Storage Integration**: Direct extraction from Backblaze B2 storage URLs
 - **Modular Architecture**: Clean, extensible codebase with separate extractors
 - **REST API**: FastAPI-based API with async support
 - **Quality Metrics**: Extraction coverage and confidence scoring
@@ -46,6 +47,11 @@ A robust, multi-method PDF extraction system designed to achieve near 100% extra
 - Automatic scanned PDF detection
 - Mathematical formula OCR
 - Layout-aware text extraction
+
+### 7. Cloud Storage Integration (Backblaze B2)
+- Direct extraction from B2 download URLs
+- Authenticated downloads with fallback support
+- Automatic PDF validation and cleanup
 
 ## Installation
 
@@ -141,11 +147,49 @@ uvicorn app.main:app --reload
 curl -X POST http://localhost:8000/api/v1/extract \
   -F "file=@your_paper.pdf" \
   -F "extract_text=true" \
-  -F "extract_figures=true" \
-  -F "extract_tables=true" \
-  -F "extract_equations=true" \
-  -F "extract_code=true" \
-  -F "use_ocr=true"
+```
+
+### Method 3: B2 Cloud Storage Extraction
+
+Extract PDFs directly from Backblaze B2 URLs:
+
+1. Configure B2 credentials in `.env`:
+```env
+B2_KEY_ID=your_b2_key_id
+B2_APPLICATION_KEY=your_b2_application_key
+B2_BUCKET_NAME=your_bucket_name
+```
+
+2. Extract from B2 URL:
+```bash
+curl -X POST http://localhost:8002/api/v1/extract-from-b2 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "b2_url": "https://f003.backblazeb2.com/b2api/v2/b2_download_file_by_id?fileId=your_file_id",
+    "extract_text": true,
+    "extract_figures": true,
+    "async_processing": false
+  }'
+```
+
+3. For async processing:
+```python
+import requests
+
+# Start extraction
+response = requests.post("http://localhost:8002/api/v1/extract-from-b2", json={
+    "b2_url": "https://f003.backblazeb2.com/b2api/v2/b2_download_file_by_id?fileId=your_file_id",
+    "async_processing": True
+})
+
+job_id = response.json()["job_id"]
+
+# Check status
+status_response = requests.get(f"http://localhost:8002/api/v1/status/{job_id}")
+print(status_response.json())
+```
+
+See `docs/b2_extraction_api.md` for complete API documentation and `example/b2_extraction_example.py` for usage examples.
 ```
 
 3. Check extraction status:

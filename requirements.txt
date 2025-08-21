@@ -73,6 +73,9 @@ flake8==7.0.0
 mypy==1.8.0
 pre-commit==3.6.2
 
+# Cloud Storage
+b2sdk==1.21.0  # Backblaze B2 SDK
+
 # External Service Dependencies
 # Note: GROBID, PDFFigures2, and Nougat run as separate services
 redis==5.0.1  # For caching

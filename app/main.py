@@ -12,9 +12,10 @@ from loguru import logger
 from app.config import settings
 from app.models.schemas import (
     ExtractionRequest, ExtractionResponse, ExtractionResult,
-    ExtractionStatus
+    ExtractionStatus, B2ExtractionRequest, B2ExtractionResponse
 )
 from app.services.pipeline import ExtractionPipeline
+from app.services.b2_service import b2_service
 from app.utils.helpers import validate_pdf, get_pdf_info, create_extraction_summary
 from app.utils.exceptions import InvalidPDFError, ExtractionError
 
@@ -61,6 +62,16 @@ async def startup_event():
     settings.paper_folder.mkdir(exist_ok=True)
     (settings.paper_folder / "uploads").mkdir(exist_ok=True)
     (settings.paper_folder / "results").mkdir(exist_ok=True)
+    
+    # Initialize B2 service if credentials are available
+    if settings.b2_key_id and settings.b2_application_key:
+        try:
+            await b2_service.initialize()
+            logger.info("B2 service initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize B2 service: {e}")
+    else:
+        logger.info("B2 credentials not configured, B2 functionality will be disabled")
     
     logger.info("Application started successfully")
 
@@ -188,6 +199,116 @@ async def extract_pdf(
             raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
 
+@app.post(f"{settings.api_prefix}/extract-from-b2")
+async def extract_pdf_from_b2(
+    background_tasks: BackgroundTasks,
+    request: B2ExtractionRequest
+):
+    """
+    Extract content from PDF stored in Backblaze B2
+    
+    This endpoint accepts a B2 download URL, downloads the PDF,
+    and extracts various types of content using multiple extraction techniques.
+    """
+    
+    # Validate B2 URL
+    if not b2_service.is_b2_url(request.b2_url):
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid B2 URL. Expected format: https://f003.backblazeb2.com/b2api/v2/b2_download_file_by_id?fileId=<file_id>"
+        )
+    
+    # Check if B2 service is initialized
+    if not b2_service._authorized:
+        raise HTTPException(
+            status_code=503, 
+            detail="B2 service not available. Please check B2 credentials configuration."
+        )
+    
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    
+    # Initialize job tracking
+    extraction_jobs[job_id] = {
+        "status": ExtractionStatus.PENDING,
+        "created_at": datetime.utcnow(),
+        "b2_url": request.b2_url,
+        "type": "b2_extraction"
+    }
+    
+    if request.async_processing:
+        # Process in background
+        background_tasks.add_task(process_b2_extraction, job_id, request.b2_url, request)
+        
+        return B2ExtractionResponse(
+            job_id=job_id,
+            status=ExtractionStatus.PENDING,
+            message="B2 extraction job started. Use /status endpoint to check progress.",
+            b2_url=request.b2_url
+        )
+    else:
+        # Process synchronously
+        try:
+            # Download PDF from B2
+            logger.info(f"Downloading PDF from B2 for job {job_id}")
+            try:
+                pdf_content = await b2_service.download_pdf_from_url(request.b2_url)
+            except Exception as e:
+                logger.warning(f"B2 SDK download failed, trying fallback method: {e}")
+                pdf_content = await b2_service.download_pdf_fallback(request.b2_url)
+            
+            # Save PDF to temporary file
+            temp_pdf_path = settings.paper_folder / "uploads" / f"{job_id}_b2.pdf"
+            with open(temp_pdf_path, "wb") as f:
+                f.write(pdf_content)
+            
+            # Validate PDF
+            if not validate_pdf(temp_pdf_path):
+                temp_pdf_path.unlink()  # Delete invalid file
+                raise HTTPException(status_code=400, detail="Downloaded content is not a valid PDF")
+            
+            # Create extraction request
+            extraction_request = ExtractionRequest(
+                pdf_path=str(temp_pdf_path),
+                extract_text=request.extract_text,
+                extract_figures=request.extract_figures,
+                extract_tables=request.extract_tables,
+                extract_equations=request.extract_equations,
+                extract_code=request.extract_code,
+                extract_references=request.extract_references,
+                use_ocr=request.use_ocr,
+                detect_entities=request.detect_entities
+            )
+            
+            # Run extraction
+            result = await pipeline.extract(temp_pdf_path, extraction_request)
+            
+            # Clean up temporary file
+            temp_pdf_path.unlink(missing_ok=True)
+            
+            # Update job status
+            extraction_jobs[job_id]["status"] = result.status
+            extraction_jobs[job_id]["result"] = result
+            extraction_jobs[job_id]["completed_at"] = datetime.utcnow()
+            
+            return B2ExtractionResponse(
+                job_id=job_id,
+                status=result.status,
+                result=result,
+                message="B2 extraction completed successfully",
+                b2_url=request.b2_url
+            )
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            raise
+        except Exception as e:
+            logger.error(f"B2 extraction failed for job {job_id}: {e}")
+            extraction_jobs[job_id]["status"] = ExtractionStatus.FAILED
+            extraction_jobs[job_id]["error"] = str(e)
+            
+            raise HTTPException(status_code=500, detail=f"B2 extraction failed: {str(e)}")
+
+
 async def process_extraction(job_id: str, pdf_path: Path, request: ExtractionRequest):
     """Background task for PDF extraction"""
     try:
@@ -208,6 +329,61 @@ async def process_extraction(job_id: str, pdf_path: Path, request: ExtractionReq
         extraction_jobs[job_id]["completed_at"] = datetime.utcnow()
 
 
+async def process_b2_extraction(job_id: str, b2_url: str, request: B2ExtractionRequest):
+    """Background task for B2 PDF extraction"""
+    try:
+        extraction_jobs[job_id]["status"] = ExtractionStatus.PROCESSING
+        extraction_jobs[job_id]["started_at"] = datetime.utcnow()
+        
+        # Download PDF from B2
+        logger.info(f"Downloading PDF from B2 for job {job_id}")
+        try:
+            pdf_content = await b2_service.download_pdf_from_url(b2_url)
+        except Exception as e:
+            logger.warning(f"B2 SDK download failed, trying fallback method: {e}")
+            pdf_content = await b2_service.download_pdf_fallback(b2_url)
+        
+        # Save PDF to temporary file
+        temp_pdf_path = settings.paper_folder / "uploads" / f"{job_id}_b2.pdf"
+        with open(temp_pdf_path, "wb") as f:
+            f.write(pdf_content)
+        
+        # Validate PDF
+        if not validate_pdf(temp_pdf_path):
+            temp_pdf_path.unlink()  # Delete invalid file
+            raise ValueError("Downloaded content is not a valid PDF")
+        
+        # Create extraction request
+        extraction_request = ExtractionRequest(
+            pdf_path=str(temp_pdf_path),
+            extract_text=request.extract_text,
+            extract_figures=request.extract_figures,
+            extract_tables=request.extract_tables,
+            extract_equations=request.extract_equations,
+            extract_code=request.extract_code,
+            extract_references=request.extract_references,
+            use_ocr=request.use_ocr,
+            detect_entities=request.detect_entities
+        )
+        
+        # Run extraction
+        result = await pipeline.extract(temp_pdf_path, extraction_request)
+        
+        # Clean up temporary file
+        temp_pdf_path.unlink(missing_ok=True)
+        
+        extraction_jobs[job_id]["status"] = result.status
+        extraction_jobs[job_id]["result"] = result
+        extraction_jobs[job_id]["completed_at"] = datetime.utcnow()
+        
+        logger.info(f"B2 extraction completed for job {job_id}")
+    except Exception as e:
+        logger.error(f"B2 extraction failed for job {job_id}: {e}")
+        extraction_jobs[job_id]["status"] = ExtractionStatus.FAILED
+        extraction_jobs[job_id]["error"] = str(e)
+        extraction_jobs[job_id]["completed_at"] = datetime.utcnow()
+
+
 @app.get(f"{settings.api_prefix}/status/{{job_id}}")
 async def get_job_status(job_id: str):
     """Get status of extraction job"""
@@ -220,6 +396,8 @@ async def get_job_status(job_id: str):
         "job_id": job_id,
         "status": job["status"],
         "file_name": job.get("file_name"),
+        "b2_url": job.get("b2_url"),
+        "type": job.get("type", "file_upload"),
         "created_at": job.get("created_at"),
         "started_at": job.get("started_at"),
         "completed_at": job.get("completed_at")
