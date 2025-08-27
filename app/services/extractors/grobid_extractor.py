@@ -39,7 +39,8 @@ class GROBIDExtractor:
     
     def __init__(self, grobid_url: str = None):
         self.grobid_url = grobid_url or settings.grobid_url
-        self.client = httpx.AsyncClient(timeout=180.0)  # Increased timeout for large PDFs
+        self.client = None  # Initialize client lazily
+        self._service_available = None  # Cache service availability
         
     async def __aenter__(self):
         return self
@@ -47,13 +48,24 @@ class GROBIDExtractor:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.client.aclose()
     
+    async def _ensure_client(self):
+        """Ensure HTTP client is initialized"""
+        if self.client is None:
+            self.client = httpx.AsyncClient(timeout=180.0)
+    
     async def check_service(self) -> bool:
         """Check if GROBID service is available"""
+        if self._service_available is not None:
+            return self._service_available
+            
         try:
+            await self._ensure_client()
             response = await self.client.get(f"{self.grobid_url}/api/isalive")
-            return response.status_code == 200
+            self._service_available = response.status_code == 200
+            return self._service_available
         except Exception as e:
-            logger.error(f"GROBID service unavailable: {e}")
+            logger.warning(f"GROBID service unavailable: {e}")
+            self._service_available = False
             return False
     
     async def extract(self, pdf_path: Path) -> Dict[str, Any]:
@@ -64,7 +76,14 @@ class GROBIDExtractor:
             Dictionary containing metadata, sections, and references
         """
         if not await self.check_service():
-            raise ExtractionError("GROBID service is not available")
+            # Return empty result instead of raising error
+            logger.warning("GROBID service not available, returning empty result")
+            return {
+                'metadata': Metadata(title="Unknown", page_count=0),
+                'sections': [],
+                'references': [],
+                'raw_tei': None
+            }
         
         try:
             # Process full document
@@ -91,6 +110,8 @@ class GROBIDExtractor:
     
     async def _process_fulltext(self, pdf_path: Path) -> str:
         """Process PDF with GROBID fulltext endpoint"""
+        await self._ensure_client()
+        
         with open(pdf_path, 'rb') as f:
             files = {'input': (pdf_path.name, f, 'application/pdf')}
             

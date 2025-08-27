@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     # Gemini API
     gemini_api_key: Optional[str] = None
     
+    # RabbitMQ Configuration
+    rabbitmq_host: str = "localhost"
+    rabbitmq_port: int = 5672
+    rabbitmq_user: Optional[str] = None
+    rabbitmq_password: Optional[str] = None
+    rabbitmq_exchange: str = "scholarai.exchange"
+    rabbitmq_extraction_queue: str = "scholarai.extraction.queue"
+    rabbitmq_extraction_completed_queue: str = "scholarai.extraction.completed.queue"
+    rabbitmq_extraction_routing_key: str = "scholarai.extraction"
+    rabbitmq_extraction_completed_routing_key: str = "scholarai.extraction.completed"
+    
     class Config:
         env_file = ".env"
         case_sensitive = False

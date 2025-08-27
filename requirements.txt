@@ -46,6 +46,7 @@ requests==2.31.0
 # NLP & Text Processing
 spacy==3.7.2
 nltk==3.8.1
+textstat==0.7.3
 
 # Math & LaTeX
 sympy==1.12
@@ -75,6 +76,10 @@ pre-commit==3.6.2
 
 # Cloud Storage
 b2sdk==1.21.0  # Backblaze B2 SDK
+
+# Message Queue
+pika==1.3.2  # RabbitMQ client (legacy)
+aio-pika==9.3.1  # Async RabbitMQ client
 
 # External Service Dependencies
 # Note: GROBID, PDFFigures2, and Nougat run as separate services
