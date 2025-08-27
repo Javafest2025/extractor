@@ -82,13 +82,16 @@ class ExtractionPipeline:
         """
         start_time = datetime.utcnow()
         
+        # Get page count early
+        page_count = self._get_pdf_page_count(pdf_path)
+        
         # Initialize result
         result = ExtractionResult(
             pdf_path=str(pdf_path),
             pdf_hash=self._calculate_file_hash(pdf_path),
             status=ExtractionStatus.PROCESSING,
             extraction_methods=[],
-            metadata=Metadata(title="Unknown", page_count=0)
+            metadata=Metadata(title="Unknown", page_count=page_count)
         )
         
         try:
@@ -237,7 +240,12 @@ class ExtractionPipeline:
             if task_name == 'grobid' or task_name == 'text_fallback':
                 # Text extraction results
                 if 'metadata' in data:
-                    result.metadata = data['metadata']
+                    # Preserve page_count if it's already set correctly
+                    new_metadata = data['metadata']
+                    if hasattr(result.metadata, 'page_count') and result.metadata.page_count > 0:
+                        # Keep the existing page_count if it's valid
+                        new_metadata.page_count = result.metadata.page_count
+                    result.metadata = new_metadata
                 if 'sections' in data:
                     result.sections.extend(data['sections'])
                 if 'references' in data:
@@ -320,12 +328,14 @@ class ExtractionPipeline:
                     )
                     sections.append(section)
             
+            # Get page count before closing the document
+            page_count = len(doc)
             doc.close()
             
             # Create basic metadata
             metadata = Metadata(
                 title="Extracted Document",
-                page_count=len(doc),
+                page_count=page_count,
                 language="en"
             )
             
@@ -561,6 +571,18 @@ class ExtractionPipeline:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
+    
+    def _get_pdf_page_count(self, pdf_path: Path) -> int:
+        """Get the number of pages in a PDF file"""
+        try:
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            page_count = len(doc)
+            doc.close()
+            return page_count
+        except Exception as e:
+            logger.warning(f"Failed to get page count for {pdf_path}: {e}")
+            return 0
     
     async def _save_result(self, result: ExtractionResult):
         """Save extraction result to JSON file"""

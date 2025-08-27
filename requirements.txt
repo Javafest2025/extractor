@@ -13,8 +13,10 @@ pdf2image==1.17.0
 
 # OCR & Text Extraction
 pytesseract==0.3.10
-pillow==10.2.0
+pillow<10.0.0  # Required for EasyOCR compatibility (ANTIALIAS support)
 opencv-python==4.9.0.80
+easyocr==1.7.0  # Free OCR for figure text extraction
+numpy<2.0.0  # Required for compatibility with EasyOCR and other packages
 
 # Machine Learning & Deep Learning
 torch==2.2.0

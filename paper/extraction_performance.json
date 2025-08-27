@@ -1,9 +1,9 @@
 {
   "recent_performance": [
     {
-      "job_id": "46b6d50b-c913-46dd-ba55-8400830acea1",
-      "timestamp": "2025-08-27T09:00:42.861709",
-      "processing_time": 90.721293,
+      "job_id": "5c0d9e80-3529-4cdf-aba3-bf037e34c106",
+      "timestamp": "2025-08-27T17:22:41.427132",
+      "processing_time": 79.143437,
       "quality": 23.55185185185185,
       "retry_count": 0,
       "methods_used": [
@@ -16,113 +16,9 @@
       "success": true
     },
     {
-      "job_id": "478b35ae-e047-457c-8075-1ca6559b102c",
-      "timestamp": "2025-08-27T09:36:46.791130",
-      "processing_time": 69.03403,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "b2b39621-ac38-4b81-ac07-e2f868f29c9f",
-      "timestamp": "2025-08-27T09:46:20.918415",
-      "processing_time": 55.819199,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "8b3362d5-0e17-4339-9f43-e9caea77b84b",
-      "timestamp": "2025-08-27T09:52:46.245916",
-      "processing_time": 57.415723,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "8b3362d5-0e17-4339-9f43-e9caea77b84b",
-      "timestamp": "2025-08-27T09:59:24.075784",
-      "processing_time": 84.518216,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "971560eb-4dd5-4f4b-8e76-42d39dacf097",
-      "timestamp": "2025-08-27T09:59:55.720087",
-      "processing_time": 31.191927,
-      "quality": 7.65,
-      "retry_count": 0,
-      "methods_used": [
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "e475eb4c-07e0-4729-be93-45478a639f61",
-      "timestamp": "2025-08-27T14:16:42.165018",
-      "processing_time": 55.267207,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "0f558221-083a-436f-b987-d078f8edc448",
-      "timestamp": "2025-08-27T14:26:29.913949",
-      "processing_time": 59.033869,
-      "quality": 20.561538461538458,
-      "retry_count": 0,
-      "methods_used": [
-        "grobid",
-        "figure",
-        "table",
-        "code",
-        "ocr_math"
-      ],
-      "success": true
-    },
-    {
-      "job_id": "5d8dcb06-8506-4148-827b-0dfcd57fc8f2",
-      "timestamp": "2025-08-27T14:39:25.623588",
-      "processing_time": 111.263826,
+      "job_id": "0a0c0687-bb8a-43ef-ac09-24bbfceed4cd",
+      "timestamp": "2025-08-27T17:46:14.689353",
+      "processing_time": 132.275691,
       "quality": 23.55185185185185,
       "retry_count": 0,
       "methods_used": [
@@ -137,25 +33,25 @@
   ],
   "method_success_rates": {
     "grobid": {
-      "success": 8,
-      "total": 8
+      "success": 2,
+      "total": 2
     },
     "figure": {
-      "success": 9,
-      "total": 9
+      "success": 2,
+      "total": 2
     },
     "table": {
-      "success": 9,
-      "total": 9
+      "success": 2,
+      "total": 2
     },
     "code": {
-      "success": 9,
-      "total": 9
+      "success": 2,
+      "total": 2
     },
     "ocr_math": {
-      "success": 9,
-      "total": 9
+      "success": 2,
+      "total": 2
     }
   },
-  "last_updated": "2025-08-27T14:39:25.623588"
+  "last_updated": "2025-08-27T17:46:14.689353"
 }

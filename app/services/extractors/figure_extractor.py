@@ -12,10 +12,12 @@ from PIL import Image
 from loguru import logger
 import httpx
 from dataclasses import dataclass
+import io
 
 from app.models.schemas import Figure, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
+from app.services.ocr.ocr_manager import OCRManager
 
 
 @dataclass
@@ -28,18 +30,24 @@ class FigureCandidate:
     caption: Optional[str] = None
     label: Optional[str] = None
     page: int = 1
+    ocr_text: Optional[str] = None  # OCR extracted text from the image
+    ocr_confidence: Optional[float] = None  # OCR confidence score
 
 
 class FigureExtractor:
     """
     Enhanced multi-method figure extraction using PDFFigures2 as primary
     and computer vision techniques as fallback with advanced validation
+    and OCR text extraction for LLM processing
     """
     
     def __init__(self, output_dir: Path = None):
         self.output_dir = output_dir or settings.paper_folder / "figures"
         self.output_dir.mkdir(exist_ok=True, parents=True)
         self.pdffigures2_available = self._check_pdffigures2()
+        
+        # Initialize OCR manager
+        self.ocr_manager = OCRManager(use_gpu=settings.use_gpu)
         
         # Caption detection patterns
         self.CAPTION_PATTERNS = [
@@ -80,6 +88,10 @@ class FigureExtractor:
             logger.warning("PDFFigures2 not available, using fallback methods")
             return False
     
+    def _is_ocr_available(self):
+        """Check if OCR is available"""
+        return self.ocr_manager.is_ocr_available()
+    
     async def extract(self, pdf_path: Path) -> List[Figure]:
         """
         Enhanced figure extraction with validation and caption detection
@@ -110,10 +122,21 @@ class FigureExtractor:
         # Phase 3: Figure validation and filtering
         validated_candidates = await self._validate_figure_candidates(candidates_with_captions, pdf_path)
         
-        # Phase 4: Reference matching with text
-        enhanced_candidates = await self._match_text_references(validated_candidates, pdf_path)
+        # Phase 4: OCR text extraction for LLM processing
+        ocr_enhanced_candidates = []
+        for candidate in validated_candidates:
+            # Try to extract OCR from saved image first
+            if candidate.image_path:
+                candidate = await self._extract_ocr_from_figure(candidate, pdf_path)
+            else:
+                # Fallback to extracting from PDF region
+                candidate = await self._extract_ocr_from_pdf_region(candidate, pdf_path)
+            ocr_enhanced_candidates.append(candidate)
         
-        # Phase 5: Deduplication and ranking
+        # Phase 5: Reference matching with text
+        enhanced_candidates = await self._match_text_references(ocr_enhanced_candidates, pdf_path)
+        
+        # Phase 6: Deduplication and ranking
         final_figures = self._deduplicate_and_rank_figures(enhanced_candidates)
         
         logger.info(f"Final result: {len(final_figures)} validated figures from {len(candidates)} candidates")
@@ -272,7 +295,9 @@ class FigureExtractor:
                 image_path=candidate.image_path,
                 type=self._determine_figure_type(candidate),
                 extraction_method=candidate.method,
-                confidence=candidate.confidence
+                confidence=candidate.confidence,
+                ocr_text=candidate.ocr_text,
+                ocr_confidence=candidate.ocr_confidence
             )
             unique_figures.append(figure)
         
@@ -884,6 +909,70 @@ class FigureExtractor:
         
         return min(1.0, score)
     
+    async def _extract_ocr_from_figure(self, candidate: FigureCandidate, pdf_path: Path) -> FigureCandidate:
+        """Extract OCR text from figure image for LLM processing"""
+        if not self._is_ocr_available() or not candidate.image_path:
+            return candidate
+        
+        try:
+            # Load the figure image
+            image_path = Path(candidate.image_path)
+            if not image_path.exists():
+                return candidate
+            
+            # Extract text using OCR manager
+            ocr_result = await self.ocr_manager.extract_text(image_path)
+            
+            if ocr_result and ocr_result.text.strip():
+                candidate.ocr_text = ocr_result.text
+                candidate.ocr_confidence = ocr_result.confidence
+                
+                logger.debug(f"OCR extracted from figure {candidate.label}: {len(ocr_result.text)} chars, confidence: {ocr_result.confidence:.2f}, provider: {ocr_result.provider}")
+            
+        except Exception as e:
+            logger.warning(f"OCR extraction failed for figure {candidate.label}: {e}")
+        
+        return candidate
+    
+
+    
+    async def _extract_ocr_from_pdf_region(self, candidate: FigureCandidate, pdf_path: Path) -> FigureCandidate:
+        """Extract OCR text from PDF region when image file is not available"""
+        if not self._is_ocr_available():
+            return candidate
+        
+        try:
+            # Open PDF and extract the region as image
+            doc = fitz.open(str(pdf_path))
+            page = doc[candidate.page - 1]  # Convert to 0-based index
+            
+            # Create transformation matrix for the figure region
+            bbox = candidate.bbox
+            rect = fitz.Rect(bbox.x1, bbox.y1, bbox.x2, bbox.y2)
+            
+            # Extract region as image with higher resolution
+            mat = fitz.Matrix(2, 2)  # 2x zoom for better OCR
+            pix = page.get_pixmap(matrix=mat, clip=rect)
+            
+            # Convert to bytes
+            img_data = pix.tobytes("png")
+            
+            # Extract text using OCR manager
+            ocr_result = await self.ocr_manager.extract_text_from_bytes(img_data)
+            
+            if ocr_result and ocr_result.text.strip():
+                candidate.ocr_text = ocr_result.text
+                candidate.ocr_confidence = ocr_result.confidence
+                
+                logger.debug(f"OCR extracted from PDF region {candidate.label}: {len(ocr_result.text)} chars, confidence: {ocr_result.confidence:.2f}, provider: {ocr_result.provider}")
+            
+            doc.close()
+            
+        except Exception as e:
+            logger.warning(f"PDF region OCR extraction failed for figure {candidate.label}: {e}")
+        
+        return candidate
+    
     def _validate_figure_bbox(self, bbox: BoundingBox) -> float:
         """Validate figure bounding box dimensions"""
         width = bbox.x2 - bbox.x1
@@ -1019,7 +1108,9 @@ class FigureExtractor:
                     type=self._determine_figure_type(candidate),
                     references=getattr(candidate, 'references', []),
                     extraction_method=candidate.method,
-                    confidence=candidate.confidence
+                    confidence=candidate.confidence,
+                    ocr_text=candidate.ocr_text,  # Include OCR extracted text
+                    ocr_confidence=candidate.ocr_confidence  # Include OCR confidence
                 )
                 final_figures.append(figure)
         

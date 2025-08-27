@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     ocr_language: str = "eng"
     use_gpu: bool = True
     
+    # OCR Configuration (free local options only)
+    ocr_provider: str = "auto"  # auto, easyocr, paddleocr
+    
     # Cache
     redis_url: Optional[str] = None
     cache_ttl: int = 3600

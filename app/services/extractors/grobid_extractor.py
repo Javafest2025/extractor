@@ -75,17 +75,23 @@ class GROBIDExtractor:
         Returns:
             Dictionary containing metadata, sections, and references
         """
+        # Get page count from PDF
+        page_count = self._get_pdf_page_count(pdf_path)
+        
         if not await self.check_service():
             # Return empty result instead of raising error
             logger.warning("GROBID service not available, returning empty result")
             return {
-                'metadata': Metadata(title="Unknown", page_count=0),
+                'metadata': Metadata(title="Unknown", page_count=page_count),
                 'sections': [],
                 'references': [],
                 'raw_tei': None
             }
         
         try:
+            # Store PDF path for page count fallback
+            self.pdf_path = pdf_path
+            
             # Process full document
             tei_xml = await self._process_fulltext(pdf_path)
             
@@ -208,14 +214,58 @@ class GROBIDExtractor:
             except:
                 pass
         
+        # Get page count from TEI or fallback to PDF
+        page_count = self._get_pdf_page_count_from_tei(root)
+        if page_count == 0:
+            # Fallback to getting page count from PDF file
+            page_count = self._get_pdf_page_count(self.pdf_path) if hasattr(self, 'pdf_path') else 0
+        
         return Metadata(
             title=title,
             authors=authors,
             abstract=abstract,
             keywords=keywords,
             doi=doi,
-            year=year
+            year=year,
+            page_count=page_count
         )
+    
+    def _get_pdf_page_count(self, pdf_path: Path) -> int:
+        """Get the number of pages in a PDF file"""
+        try:
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            page_count = len(doc)
+            doc.close()
+            return page_count
+        except Exception as e:
+            logger.warning(f"Failed to get page count for {pdf_path}: {e}")
+            return 0
+    
+    def _get_pdf_page_count_from_tei(self, root: ET.Element) -> int:
+        """Extract page count from TEI XML if available"""
+        try:
+            # Look for page count in TEI header
+            header = root.find('.//tei:teiHeader', self.NAMESPACES)
+            if header is not None:
+                # Check for page count in various possible locations
+                page_count_elem = header.find('.//tei:extent/tei:measure[@unit="page"]', self.NAMESPACES)
+                if page_count_elem is not None and page_count_elem.text:
+                    try:
+                        return int(page_count_elem.text)
+                    except ValueError:
+                        pass
+                
+                # Alternative: count pages in body
+                body = root.find('.//tei:body', self.NAMESPACES)
+                if body is not None:
+                    pages = body.findall('.//tei:pb', self.NAMESPACES)
+                    if pages:
+                        return len(pages) + 1  # +1 because first page doesn't have pb element
+        except Exception as e:
+            logger.warning(f"Failed to extract page count from TEI: {e}")
+        
+        return 0
     
     def _extract_sections(self, root: ET.Element) -> List[Section]:
         """Extract document sections from TEI body"""
