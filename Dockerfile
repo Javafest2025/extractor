@@ -1,63 +1,95 @@
-# Dockerfile
-FROM python:3.10-slim
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    # Basic tools
-    wget \
-    git \
-    build-essential \
-    # PDF processing
-    poppler-utils \
-    # OCR
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-equ \
-    # Image processing
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    # OpenCV dependencies
-    libglib2.0-0 \
-    libgl1-mesa-glx \
-    # Cleanup
-    && rm -rf /var/lib/apt/lists/*
-
-# Install PDFFigures2 (Java-based)
-RUN apt-get update && apt-get install -y default-jre && \
-    wget https://github.com/allenai/pdffigures2/releases/download/v0.1.0/pdffigures2-0.1.0.jar -O /usr/local/bin/pdffigures2.jar && \
-    echo '#!/bin/bash\njava -jar /usr/local/bin/pdffigures2.jar "$@"' > /usr/local/bin/pdffigures2 && \
-    chmod +x /usr/local/bin/pdffigures2
+# Multi-stage build for PDF Extractor FastAPI Service
+# Stage 1: Build dependencies
+FROM python:3.11-slim AS builder
 
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies for building
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY requirements-prod.txt requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Create virtual environment and install dependencies
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Download spaCy model
-RUN python -m spacy download en_core_web_sm
+# Install PyTorch CPU-only first, then other requirements
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch==2.2.0+cpu torchvision==0.17.0+cpu -f https://download.pytorch.org/whl/torch_stable.html && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Download NLTK data
-RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
+# Stage 2: Runtime image
+FROM python:3.11-slim
+
+# Install runtime dependencies only (no dev packages)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    # OpenCV dependencies (runtime only)
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    # Tesseract OCR
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    # Image processing dependencies (runtime only)
+    libpng16-16 \
+    libjpeg62-turbo \
+    libtiff6 \
+    # Additional system libraries
+    libgcc-s1 \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
+
+# Create non-root user
+RUN addgroup --system app && adduser --system --no-create-home --ingroup app app
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/cache /app/paper /app/logs /home/app/.cache && \
+    chown -R app:app /app /home/app
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set environment variables for HuggingFace cache
+ENV TRANSFORMERS_CACHE="/app/cache/transformers"
+ENV HF_HOME="/app/cache/huggingface"
+ENV TORCH_HOME="/app/cache/torch"
+
+# Set working directory
+WORKDIR /app
 
 # Copy application code
-COPY . .
+COPY app/ ./app/
+COPY scripts/ ./scripts/
 
-# Create necessary directories
-RUN mkdir -p paper logs
+# Create necessary directories and set permissions
+RUN mkdir -p ./paper/uploads ./paper/results ./cache/transformers ./cache/huggingface ./cache/torch ./logs && \
+    chown -R app:app /app
+
+# Switch to non-root user
+USER app
 
 # Expose port
-EXPOSE 8000
+EXPOSE 8002
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV GROBID_URL=http://grobid:8070
+# Health check (using the simple health endpoint)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8002/health || exit 1
 
 # Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

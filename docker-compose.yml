@@ -1,0 +1,35 @@
+services:
+  extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scholar-extractor
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8002}:8002"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8002
+      - DEBUG=${DEBUG:-False}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RABBITMQ_HOST=user-rabbitmq
+      - RABBITMQ_PORT=5672
+    volumes:
+      - ./paper:/app/paper
+      - ./logs:/app/logs
+    networks:
+      - scholarai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Connect to existing network from main orchestration
+networks:
+  scholarai-network:
+    external: true
+    name: docker_scholarai-network

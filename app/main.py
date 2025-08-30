@@ -155,6 +155,16 @@ async def root():
     }
 
 
+@app.get("/health")
+async def root_health_check():
+    """Simple health check endpoint for Docker and monitoring"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": settings.app_version,
+    }
+
+
 @app.get(f"{settings.api_prefix}/health")
 async def health_check():
     """Health check endpoint"""
