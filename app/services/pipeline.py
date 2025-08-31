@@ -320,12 +320,15 @@ class ExtractionPipeline:
                 text = page.get_text()
                 
                 if text.strip():
+                    # Split text into paragraphs for better structure
+                    paragraphs = self._split_text_into_paragraphs(text.strip())
+                    
                     # Create a simple section for each page
                     section = Section(
                         title=f"Page {page_num + 1}",
                         page_start=page_num + 1,
                         page_end=page_num + 1,
-                        paragraphs=[Paragraph(text=text.strip(), page=page_num + 1)]
+                        paragraphs=[Paragraph(text=para, page=page_num + 1) for para in paragraphs if para.strip()]
                     )
                     sections.append(section)
             
@@ -357,6 +360,22 @@ class ExtractionPipeline:
                 'error': str(e),
                 'method': 'text_fallback'
             }
+    
+    def _split_text_into_paragraphs(self, text: str) -> List[str]:
+        """Split text into logical paragraphs"""
+        import re
+        
+        # Split by double newlines or multiple spaces
+        paragraphs = re.split(r'\n\s*\n|\s{3,}', text)
+        
+        # Clean up paragraphs
+        cleaned_paragraphs = []
+        for para in paragraphs:
+            para = para.strip()
+            if para and len(para) > 10:  # Only keep substantial paragraphs
+                cleaned_paragraphs.append(para)
+        
+        return cleaned_paragraphs
     
     def _enhance_with_ocr(self, result: ExtractionResult, ocr_text: List[Dict]):
         """Enhance extraction result with OCR text"""
@@ -849,6 +868,9 @@ class ExtractionPipeline:
                     corrected_result
                 )
         
+        # Validate and correct page numbers
+        corrected_result = await self._validate_page_numbers(corrected_result)
+        
         return corrected_result
     
     async def _correct_table_false_positives(self, result: ExtractionResult, 
@@ -921,7 +943,7 @@ class ExtractionPipeline:
         return new_section
     
     async def _correct_text_coherence_issues(self, result: ExtractionResult) -> ExtractionResult:
-        """Improve text coherence by reconstructing flow"""
+        """Improve text coherence by reconstructing flow and fixing page numbers"""
         if not result.sections:
             return result
         
@@ -946,7 +968,94 @@ class ExtractionPipeline:
         if current_section:
             merged_sections.append(current_section)
         
+        # Improve page number accuracy for each section
+        for section in merged_sections:
+            self._improve_section_page_numbers(section)
+        
         result.sections = merged_sections
+        return result
+    
+    def _improve_section_page_numbers(self, section: Section):
+        """Improve page number accuracy for a section based on paragraph content"""
+        if not section.paragraphs:
+            return
+        
+        # Get all unique page numbers from paragraphs
+        page_numbers = set()
+        for para in section.paragraphs:
+            if hasattr(para, 'page'):
+                page_numbers.add(para.page)
+            elif isinstance(para, dict) and 'page' in para:
+                page_numbers.add(para['page'])
+        
+        if page_numbers:
+            # Update section page range based on actual paragraph pages
+            section.page_start = min(page_numbers)
+            section.page_end = max(page_numbers)
+            
+            # If section spans multiple pages, check for logical breaks
+            if section.page_end - section.page_start > 2:
+                # Look for natural section breaks
+                self._detect_section_boundaries(section)
+    
+    def _detect_section_boundaries(self, section: Section):
+        """Detect natural section boundaries within a multi-page section"""
+        # Group paragraphs by page
+        page_paragraphs = {}
+        for para in section.paragraphs:
+            page = getattr(para, 'page', 1) if hasattr(para, 'page') else para.get('page', 1)
+            if page not in page_paragraphs:
+                page_paragraphs[page] = []
+            page_paragraphs[page].append(para)
+        
+        # Look for pages with section-like content (headers, etc.)
+        section_indicators = ['introduction', 'method', 'result', 'conclusion', 'discussion', 'abstract']
+        
+        for page_num, paras in page_paragraphs.items():
+            page_text = ' '.join([getattr(p, 'text', '') if hasattr(p, 'text') else str(p) for p in paras])
+            page_text_lower = page_text.lower()
+            
+            # Check if this page contains section indicators
+            for indicator in section_indicators:
+                if indicator in page_text_lower:
+                    # This might be a new section, adjust page_end
+                    if page_num > section.page_start:
+                        section.page_end = page_num - 1
+                    break
+    
+    async def _validate_page_numbers(self, result: ExtractionResult) -> ExtractionResult:
+        """Validate and correct page numbers across all sections"""
+        if not result.sections:
+            return result
+        
+        # Get total page count from metadata
+        total_pages = result.metadata.page_count if hasattr(result.metadata, 'page_count') else 0
+        
+        for section in result.sections:
+            # Validate page_start and page_end
+            if section.page_start < 1:
+                section.page_start = 1
+            
+            if total_pages > 0 and section.page_end > total_pages:
+                section.page_end = total_pages
+            
+            # Ensure page_end >= page_start
+            if section.page_end < section.page_start:
+                section.page_end = section.page_start
+            
+            # Validate paragraph page numbers
+            for para in section.paragraphs:
+                if hasattr(para, 'page'):
+                    if para.page < 1:
+                        para.page = 1
+                    elif total_pages > 0 and para.page > total_pages:
+                        para.page = total_pages
+                elif isinstance(para, dict) and 'page' in para:
+                    if para['page'] < 1:
+                        para['page'] = 1
+                    elif total_pages > 0 and para['page'] > total_pages:
+                        para['page'] = total_pages
+        
         return result
     
     async def _reconstruct_text_flow(self, sections: List[Section]) -> List[Section]:

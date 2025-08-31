@@ -301,23 +301,15 @@ class GROBIDExtractor:
                 section_type = stype
                 break
         
-        # Extract paragraphs
+        # Extract paragraphs with improved page detection
         paragraphs = []
         page_nums = set()
         
         for p_elem in div.findall('tei:p', self.NAMESPACES):
             text = self._extract_text_from_element(p_elem)
             if text:
-                # Try to get page info from coordinates
-                coords = p_elem.get('coords')
-                page = 1  # default
-                if coords:
-                    try:
-                        # Parse coords format: "page,x1,y1,x2,y2;..."
-                        page = int(coords.split(',')[0])
-                    except:
-                        pass
-                
+                # Use improved page detection
+                page = self._get_accurate_page_number(p_elem, text)
                 page_nums.add(page)
                 paragraphs.append(Paragraph(
                     text=text,
@@ -339,6 +331,79 @@ class GROBIDExtractor:
             page_end=max(page_nums) if page_nums else 1,
             paragraphs=paragraphs
         )
+    
+    def _get_accurate_page_number(self, p_elem: ET.Element, text: str) -> int:
+        """Get accurate page number using multiple methods"""
+        # Method 1: Try to get from coordinates (GROBID's method)
+        coords = p_elem.get('coords')
+        if coords:
+            try:
+                # Parse coords format: "page,x1,y1,x2,y2;..."
+                page = int(coords.split(',')[0])
+                if page > 0:
+                    return page
+            except:
+                pass
+        
+        # Method 2: Use PyMuPDF to find page by text content
+        if hasattr(self, 'pdf_path') and self.pdf_path.exists():
+            try:
+                import fitz
+                doc = fitz.open(str(self.pdf_path))
+                
+                # Search for the text in each page
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
+                    page_text = page.get_text()
+                    
+                    # Check if this text appears on this page
+                    # Use a more flexible matching approach
+                    if self._text_matches_page(text, page_text):
+                        doc.close()
+                        return page_num + 1
+                
+                doc.close()
+            except Exception as e:
+                logger.warning(f"Failed to use PyMuPDF for page detection: {e}")
+        
+        # Method 3: Fallback to page 1
+        return 1
+    
+    def _text_matches_page(self, search_text: str, page_text: str) -> bool:
+        """Check if text content matches a page using flexible matching"""
+        # Clean and normalize text
+        search_clean = self._normalize_text(search_text)
+        page_clean = self._normalize_text(page_text)
+        
+        # If search text is very short, require exact match
+        if len(search_clean) < 20:
+            return search_clean in page_clean
+        
+        # For longer text, use partial matching
+        # Split into words and check if most words are present
+        search_words = set(search_clean.split())
+        page_words = set(page_clean.split())
+        
+        if not search_words:
+            return False
+        
+        # Calculate word overlap
+        common_words = search_words.intersection(page_words)
+        overlap_ratio = len(common_words) / len(search_words)
+        
+        # Require at least 70% word overlap for a match
+        return overlap_ratio >= 0.7
+    
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for comparison"""
+        import re
+        # Remove extra whitespace and normalize
+        text = re.sub(r'\s+', ' ', text.strip())
+        # Convert to lowercase for comparison
+        text = text.lower()
+        # Remove punctuation for better matching
+        text = re.sub(r'[^\w\s]', '', text)
+        return text
     
     def _extract_text_from_element(self, elem: ET.Element) -> str:
         """Extract all text from an element and its children"""
