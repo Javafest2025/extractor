@@ -524,7 +524,7 @@ async def get_extraction_result(
 
     if format == "summary":
         # Return human-readable summary
-        summary = create_extraction_summary(result.dict())
+        summary = create_extraction_summary(result.model_dump() if hasattr(result, 'model_dump') else result.dict())
         return {"summary": summary}
     else:
         # Return full JSON result
@@ -555,7 +555,7 @@ async def download_result(job_id: str):
             import json
 
             with open(result_path, "w") as f:
-                json.dump(result.dict(), f, indent=2, default=str)
+                json.dump(result.model_dump() if hasattr(result, 'model_dump') else result.dict(), f, indent=2, default=str)
         else:
             raise HTTPException(status_code=404, detail="Result not found")
 
@@ -621,10 +621,10 @@ async def extract_from_paper_folder():
         import json
 
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result.dict(), f, indent=2, ensure_ascii=False, default=str)
+            json.dump(result.model_dump() if hasattr(result, 'model_dump') else result.dict(), f, indent=2, ensure_ascii=False, default=str)
 
         # Create summary
-        summary = create_extraction_summary(result.dict())
+        summary = create_extraction_summary(result.model_dump() if hasattr(result, 'model_dump') else result.dict())
 
         # Save summary
         summary_path = settings.paper_folder / f"{pdf_path.stem}_summary.txt"

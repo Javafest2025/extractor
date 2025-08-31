@@ -69,9 +69,8 @@ class LocalStorageService:
         try:
             stored_paths = {}
             
-            # Create timestamp for this extraction
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            extraction_dir = f"{paper_id}_{timestamp}"
+            # Use only paper_id for folder naming (no timestamp to avoid duplicates)
+            extraction_dir = paper_id
             
             # Store figures
             if result.figures:
@@ -193,7 +192,9 @@ class LocalStorageService:
         json_extraction_dir.mkdir(parents=True, exist_ok=True)
         
         # Convert result to dict
-        if hasattr(result, 'dict'):
+        if hasattr(result, 'model_dump'):
+            result_dict = result.model_dump()
+        elif hasattr(result, 'dict'):
             result_dict = result.dict()
         else:
             result_dict = result
@@ -211,43 +212,43 @@ class LocalStorageService:
         if result.sections:
             sections_file = components_dir / "sections.json"
             with open(sections_file, 'w', encoding='utf-8') as f:
-                json.dump([section.dict() for section in result.sections], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([section.model_dump() if hasattr(section, 'model_dump') else section.dict() for section in result.sections], f, indent=2, ensure_ascii=False, default=str)
         
         # Store figures
         if result.figures:
             figures_file = components_dir / "figures.json"
             with open(figures_file, 'w', encoding='utf-8') as f:
-                json.dump([figure.dict() for figure in result.figures], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([figure.model_dump() if hasattr(figure, 'model_dump') else figure.dict() for figure in result.figures], f, indent=2, ensure_ascii=False, default=str)
         
         # Store tables
         if result.tables:
             tables_file = components_dir / "tables.json"
             with open(tables_file, 'w', encoding='utf-8') as f:
-                json.dump([table.dict() for table in result.tables], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([table.model_dump() if hasattr(table, 'model_dump') else table.dict() for table in result.tables], f, indent=2, ensure_ascii=False, default=str)
         
         # Store equations
         if result.equations:
             equations_file = components_dir / "equations.json"
             with open(equations_file, 'w', encoding='utf-8') as f:
-                json.dump([eq.dict() for eq in result.equations], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([eq.model_dump() if hasattr(eq, 'model_dump') else eq.dict() for eq in result.equations], f, indent=2, ensure_ascii=False, default=str)
         
         # Store code blocks
         if result.code_blocks:
             code_file = components_dir / "code_blocks.json"
             with open(code_file, 'w', encoding='utf-8') as f:
-                json.dump([code.dict() for code in result.code_blocks], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([code.model_dump() if hasattr(code, 'model_dump') else code.dict() for code in result.code_blocks], f, indent=2, ensure_ascii=False, default=str)
         
         # Store references
         if result.references:
             references_file = components_dir / "references.json"
             with open(references_file, 'w', encoding='utf-8') as f:
-                json.dump([ref.dict() for ref in result.references], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([ref.model_dump() if hasattr(ref, 'model_dump') else ref.dict() for ref in result.references], f, indent=2, ensure_ascii=False, default=str)
         
         # Store entities
         if result.entities:
             entities_file = components_dir / "entities.json"
             with open(entities_file, 'w', encoding='utf-8') as f:
-                json.dump([entity.dict() for entity in result.entities], f, indent=2, ensure_ascii=False, default=str)
+                json.dump([entity.model_dump() if hasattr(entity, 'model_dump') else entity.dict() for entity in result.entities], f, indent=2, ensure_ascii=False, default=str)
         
         return str(json_extraction_dir)
     
@@ -267,12 +268,18 @@ class LocalStorageService:
             section_content = f"Section: {section.title or 'Untitled'}\n"
             section_content += f"Level: {section.level}\n"
             section_content += f"Page: {section.page_start}-{section.page_end}\n"
-            section_content += f"Type: {section.section_type}\n"
             section_content += "=" * 50 + "\n\n"
             
             # Add paragraphs
             for para in section.paragraphs:
-                section_content += f"{para.text}\n\n"
+                # Handle both Paragraph objects and dicts
+                if hasattr(para, 'text'):
+                    text = para.text
+                elif isinstance(para, dict) and 'text' in para:
+                    text = para['text']
+                else:
+                    text = str(para)
+                section_content += f"{text}\n\n"
             
             with open(section_file, 'w', encoding='utf-8') as f:
                 f.write(section_content)
@@ -288,12 +295,18 @@ class LocalStorageService:
                     subsection_content = f"Subsection: {subsection.title or 'Untitled'}\n"
                     subsection_content += f"Level: {subsection.level}\n"
                     subsection_content += f"Page: {subsection.page_start}-{subsection.page_end}\n"
-                    subsection_content += f"Type: {subsection.section_type}\n"
                     subsection_content += "-" * 40 + "\n\n"
                     
                     # Add paragraphs
                     for para in subsection.paragraphs:
-                        subsection_content += f"{para.text}\n\n"
+                        # Handle both Paragraph objects and dicts
+                        if hasattr(para, 'text'):
+                            text = para.text
+                        elif isinstance(para, dict) and 'text' in para:
+                            text = para['text']
+                        else:
+                            text = str(para)
+                        subsection_content += f"{text}\n\n"
                     
                     with open(subsection_file, 'w', encoding='utf-8') as f:
                         f.write(subsection_content)

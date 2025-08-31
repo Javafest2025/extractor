@@ -502,7 +502,7 @@ class FigureExtractor:
                     image_path = None
                     if settings.store_locally:
                         # Store locally in organized folder structure
-                        cv_contour_dir = self.output_dir / "figures" / "cv_contour"
+                        cv_contour_dir = self.output_dir / "cv_contour"
                         cv_contour_dir.mkdir(parents=True, exist_ok=True)
                         img_path = cv_contour_dir / f"page{page_num}_fig{idx}.png"
                         cv2.imwrite(str(img_path), roi)
@@ -730,7 +730,7 @@ class FigureExtractor:
                     image_path = None
                     if settings.store_locally:
                         # Store locally in organized folder structure for analysis
-                        cv_chart_dir = self.output_dir / "figures" / "cv_chart"
+                        cv_chart_dir = self.output_dir / "cv_chart"
                         cv_chart_dir.mkdir(parents=True, exist_ok=True)
                         img_path = cv_chart_dir / f"page{page_num}_fig{idx}.png"
                         cv2.imwrite(str(img_path), roi)
@@ -915,7 +915,7 @@ class FigureExtractor:
                     image_path = None
                     if settings.store_locally:
                         # Store locally in organized folder structure
-                        cv_component_dir = self.output_dir / "figures" / "cv_component"
+                        cv_component_dir = self.output_dir / "cv_component"
                         cv_component_dir.mkdir(parents=True, exist_ok=True)
                         img_path = cv_component_dir / f"page{page_num}_fig{i}.png"
                         cv2.imwrite(str(img_path), roi)

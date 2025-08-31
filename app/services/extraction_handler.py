@@ -18,6 +18,7 @@ from app.services.b2_service import b2_service
 from app.services.cloudinary_service import cloudinary_service
 from app.services.local_storage_service import local_storage_service
 from app.models.schemas import ExtractionRequest, ExtractionResult
+from app.models.enums import ExtractionStatus
 from app.utils.helpers import validate_pdf
 from app.utils.exceptions import ExtractionError
 
@@ -476,7 +477,7 @@ class EnhancedExtractionHandler:
 
         # Run extraction
         try:
-            result = await self.pipeline.extract(pdf_path, request)
+            result = await self.pipeline.extract(pdf_path, request, skip_local_storage=True)
 
             # Update method success tracking
             for method in result.extraction_methods:
@@ -808,7 +809,7 @@ class EnhancedExtractionHandler:
             if result and status in ["completed", "partial"]:
                 # Convert result to dictionary
                 if hasattr(result, "dict"):
-                    result_dict = result.dict()
+                    result_dict = result.model_dump() if hasattr(result, 'model_dump') else result.dict()
                 else:
                     result_dict = result
 
@@ -880,7 +881,7 @@ class EnhancedExtractionHandler:
                     # Convert result to dict format expected by RabbitMQ
                     # Handle datetime serialization properly
                     if hasattr(context.result, 'dict'):
-                        result_dict_raw = context.result.dict()
+                        result_dict_raw = context.result.model_dump() if hasattr(context.result, 'model_dump') else context.result.dict()
                         # Convert datetime objects to ISO format strings
                         result_dict = self._serialize_datetime_objects(result_dict_raw)
                     else:
@@ -913,7 +914,7 @@ class EnhancedExtractionHandler:
             # Job not found
             return {
                 "jobId": job_id,
-                "status": "NOT_FOUND",
+                "status": ExtractionStatus.NOT_FOUND,
                 "completedAt": None,
                 "extractionCoverage": None,
                 "extractionResult": None,

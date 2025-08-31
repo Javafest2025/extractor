@@ -48,8 +48,7 @@ class CamelotExtractor:
                 str(pdf_path),
                 pages='all',
                 flavor='lattice',  # Use lattice for tables with borders
-                suppress_stdout=True,
-                quiet=True
+                suppress_stdout=True
             )
             
             logger.info(f"Camelot found {len(tables)} table candidates")
@@ -94,10 +93,19 @@ class CamelotExtractor:
                         # Get table image
                         table_image = table._image
                         if table_image is not None:
-                            # Convert to bytes
+                            # Convert numpy array to PIL Image, then to bytes
                             import io
+                            from PIL import Image
+                            import numpy as np
+                            
+                            # Convert numpy array to PIL Image
+                            if isinstance(table_image, np.ndarray):
+                                pil_image = Image.fromarray(table_image)
+                            else:
+                                pil_image = table_image
+                            
                             img_byte_arr = io.BytesIO()
-                            table_image.save(img_byte_arr, format='PNG')
+                            pil_image.save(img_byte_arr, format='PNG')
                             img_byte_arr = img_byte_arr.getvalue()
                             
                             # Upload to Cloudinary

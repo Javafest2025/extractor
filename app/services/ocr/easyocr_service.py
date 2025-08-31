@@ -26,6 +26,15 @@ class EasyOCRService(BaseOCRService):
         """Initialize EasyOCR service"""
         try:
             import easyocr
+            
+            # Workaround for PIL.Image.ANTIALIAS deprecation
+            try:
+                from PIL import Image
+                if not hasattr(Image, 'ANTIALIAS'):
+                    Image.ANTIALIAS = Image.Resampling.LANCZOS
+            except ImportError:
+                pass
+            
             self.reader = easyocr.Reader(self.languages, gpu=kwargs.get('use_gpu', False))
             self.is_available = True
             logger.info(f"EasyOCR initialized with languages: {self.languages}")

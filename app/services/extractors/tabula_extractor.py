@@ -44,30 +44,61 @@ class TabulaExtractor:
             logger.info(f"Extracting tables with Tabula from {pdf_path}")
             
             # Extract tables using Tabula
-            tables = tabula.read_pdf(
-                str(pdf_path),
-                pages='all',
-                multiple_tables=True,
-                guess=False,  # Don't guess table structure
-                lattice=True,  # Use lattice for tables with borders
-                stream=True,   # Use stream for tables without borders
-                pandas_options={'header': None}  # Don't assume first row is header
-            )
+            try:
+                tables = tabula.read_pdf(
+                    str(pdf_path),
+                    pages='all',
+                    multiple_tables=True,
+                    guess=False,  # Don't guess table structure
+                    lattice=True,  # Use lattice for tables with borders
+                    stream=True,   # Use stream for tables without borders
+                    pandas_options={'header': None},  # Don't assume first row is header
+                    encoding='utf-8'  # Specify encoding
+                )
+            except UnicodeDecodeError:
+                # Try with different encoding if UTF-8 fails
+                logger.warning("UTF-8 encoding failed, trying with latin-1")
+                tables = tabula.read_pdf(
+                    str(pdf_path),
+                    pages='all',
+                    multiple_tables=True,
+                    guess=False,
+                    lattice=True,
+                    stream=True,
+                    pandas_options={'header': None},
+                    encoding='latin-1'
+                )
             
             logger.info(f"Tabula found {len(tables)} table candidates")
             
             extracted_tables = []
             
             for page_idx, page_tables in enumerate(tables):
+                # Handle case where page_tables might not be a list
+                if not isinstance(page_tables, list):
+                    page_tables = [page_tables]
+                
                 for table_idx, df in enumerate(page_tables):
                     try:
-                        # Skip empty tables
-                        if df.empty or df.shape[0] <= 1:
+                        # Skip empty tables or non-DataFrame objects
+                        if not hasattr(df, 'empty') or df.empty or df.shape[0] <= 1:
                             continue
                         
-                        # Convert DataFrame to list format
-                        headers = df.iloc[0].tolist() if not df.empty else []
-                        rows = df.iloc[1:].values.tolist() if df.shape[0] > 1 else []
+                        # Convert DataFrame to list format and handle NaN values
+                        import pandas as pd
+                        
+                        # Handle headers - replace NaN with empty string
+                        if not df.empty:
+                            headers = df.iloc[0].fillna('').astype(str).tolist()
+                        else:
+                            headers = []
+                        
+                        # Handle rows - replace NaN with empty string
+                        if df.shape[0] > 1:
+                            rows_data = df.iloc[1:].fillna('').astype(str)
+                            rows = rows_data.values.tolist()
+                        else:
+                            rows = []
                         
                         # Create bounding box (Tabula doesn't provide precise bbox)
                         # We'll use a generic bbox for the page

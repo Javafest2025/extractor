@@ -13,7 +13,7 @@ from textstat import flesch_reading_ease
 
 from app.models.schemas import (
     ExtractionResult, ExtractionStatus, ExtractionRequest,
-    Metadata, Section, Figure, Table, CodeBlock, Equation, Reference, Entity
+    Metadata, Section, Figure, Table, CodeBlock, Equation, Reference, Entity, Paragraph
 )
 from app.models.enums import EntityType
 from app.config import settings
@@ -77,7 +77,7 @@ class ExtractionPipeline:
         except Exception as e:
             logger.warning(f"Code extractor initialization failed: {e}")
     
-    async def extract(self, pdf_path: Path, request: ExtractionRequest) -> ExtractionResult:
+    async def extract(self, pdf_path: Path, request: ExtractionRequest, skip_local_storage: bool = False) -> ExtractionResult:
         """
         Enhanced extraction pipeline with quality assurance
         """
@@ -133,7 +133,7 @@ class ExtractionPipeline:
         
         # Calculate processing time and finalize
         result.processing_time = (datetime.utcnow() - start_time).total_seconds()
-        await self._save_result(result)
+        await self._save_result(result, skip_local_storage)
         
         return result
     
@@ -325,7 +325,7 @@ class ExtractionPipeline:
                         title=f"Page {page_num + 1}",
                         page_start=page_num + 1,
                         page_end=page_num + 1,
-                        paragraphs=[{'text': text.strip(), 'page': page_num + 1}]
+                        paragraphs=[Paragraph(text=text.strip(), page=page_num + 1)]
                     )
                     sections.append(section)
             
@@ -367,10 +367,10 @@ class ExtractionPipeline:
                     title=f"Page {page_data['page']}",
                     page_start=page_data['page'],
                     page_end=page_data['page'],
-                    paragraphs=[{
-                        'text': page_data['text'],
-                        'page': page_data['page']
-                    }]
+                    paragraphs=[Paragraph(
+                        text=page_data['text'],
+                        page=page_data['page']
+                    )]
                 )
                 result.sections.append(section)
     
@@ -585,12 +585,12 @@ class ExtractionPipeline:
             logger.warning(f"Failed to get page count for {pdf_path}: {e}")
             return 0
     
-    async def _save_result(self, result: ExtractionResult):
+    async def _save_result(self, result: ExtractionResult, skip_local_storage: bool = False):
         """Save extraction result to JSON file and local storage"""
         output_path = settings.paper_folder / f"{Path(result.pdf_path).stem}_extraction.json"
         
         # Convert to dict
-        result_dict = result.dict()
+        result_dict = result.model_dump() if hasattr(result, 'model_dump') else result.dict()
         
         # Save to file
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -598,8 +598,8 @@ class ExtractionPipeline:
         
         logger.info(f"Extraction result saved to {output_path}")
         
-        # Store locally if enabled
-        if settings.store_locally:
+        # Store locally if enabled and not skipped
+        if settings.store_locally and not skip_local_storage:
             try:
                 # Generate a job_id and paper_id for local storage
                 job_id = f"pipeline_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
@@ -997,19 +997,19 @@ class ExtractionPipeline:
             else:
                 # Start new paragraph
                 if current_text:
-                    merged.append({
-                        'text': current_text,
-                        'page': current_page or page
-                    })
+                    merged.append(Paragraph(
+                        text=current_text,
+                        page=current_page or page
+                    ))
                 current_text = text
                 current_page = page
         
         # Add final paragraph
         if current_text:
-            merged.append({
-                'text': current_text,
-                'page': current_page or 1
-            })
+            merged.append(Paragraph(
+                text=current_text,
+                page=current_page or 1
+            ))
         
         return merged
     
