@@ -1,4 +1,4 @@
-# Python
+ # Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -26,16 +26,23 @@ dmypy.json
 *.swn
 .DS_Store
 
-# Project specific
-paper/*.pdf
+# Project specific - Ignore entire paper folder and all its contents
+paper/
+paper/*
+paper/**/*
 paper/uploads/
 paper/results/
 paper/figures/
 paper/tables/
 paper/code/
 paper/ocr_math/
+paper/json/
+paper/text/
+paper/config/
+paper/*.pdf
 paper/*_extraction.json
 paper/*_summary.txt
+paper/extraction_performance.json
 logs/
 *.log
 
@@ -66,6 +73,10 @@ sample_*.pdf
 .cache/
 __pycache__/
 *.pyc
+cache/
+cache/huggingface/
+cache/torch/
+cache/easyocr/
 
 # OS
 Thumbs.db

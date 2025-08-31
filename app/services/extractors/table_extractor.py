@@ -21,6 +21,9 @@ from textstat import flesch_reading_ease
 from app.models.schemas import Table, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
+from app.services.cloudinary_service import cloudinary_service
+from app.services.extractors.camelot_extractor import camelot_extractor
+from app.services.extractors.tabula_extractor import tabula_extractor
 
 
 class TableExtractor:
@@ -81,7 +84,8 @@ class TableExtractor:
         methods = [
             ('pdfplumber', self._extract_with_pdfplumber),
             ('transformer', self._extract_with_transformer),
-            ('pymupdf', self._extract_with_pymupdf)
+            ('camelot', self._extract_with_camelot),
+            ('tabula', self._extract_with_tabula)
         ]
         
         for method_name, method_func in methods:
@@ -173,9 +177,9 @@ class TableExtractor:
                     page, region, structure
                 )
                 
-                # Save table image
-                img_path = self.output_dir / f"transformer_page{page_num}_table{idx}.png"
-                table_image.save(img_path)
+                # Upload table image to Cloudinary
+                filename = f"transformer_page{page_num}_table{idx}"
+                cloudinary_url = await cloudinary_service.upload_pil_image(table_image, filename, "scholarai/tables")
                 
                 # Enhanced data cleaning and validation
                 if headers and rows:
@@ -186,14 +190,38 @@ class TableExtractor:
                         rows = cleaned_rows
                 
                 # Save as CSV
+                csv_path = None
+                html = None
                 if headers and rows:
-                    csv_path = self.output_dir / f"transformer_page{page_num}_table{idx}.csv"
-                    df = pd.DataFrame(rows, columns=headers[0] if headers else None)
-                    df.to_csv(csv_path, index=False)
-                    html = df.to_html(index=False, classes='table table-bordered')
-                else:
-                    csv_path = None
-                    html = None
+                    try:
+                        # Ensure headers and rows have consistent column count
+                        header_cols = len(headers[0]) if headers else 0
+                        max_row_cols = max(len(row) for row in rows) if rows else 0
+                        max_cols = max(header_cols, max_row_cols)
+                        
+                        # Normalize headers
+                        if headers and len(headers[0]) < max_cols:
+                            headers[0].extend([f"Column {i}" for i in range(len(headers[0]), max_cols)])
+                        
+                        # Normalize rows
+                        normalized_rows = []
+                        for row in rows:
+                            normalized_row = row[:max_cols]  # Truncate if too long
+                            while len(normalized_row) < max_cols:  # Extend if too short
+                                normalized_row.append("")
+                            normalized_rows.append(normalized_row)
+                        
+                        csv_path = self.output_dir / f"transformer_page{page_num}_table{idx}.csv"
+                        df = pd.DataFrame(normalized_rows, columns=headers[0] if headers else None)
+                        df.to_csv(csv_path, index=False)
+                        html = df.to_html(index=False, classes='table table-bordered')
+                        
+                        # Update rows with normalized data
+                        rows = normalized_rows
+                    except Exception as e:
+                        logger.warning(f"Failed to create CSV for table {page_num}.{idx}: {e}")
+                        csv_path = None
+                        html = None
                 
                 # Convert coordinates to PDF space
                 scale = page.rect.width / pil_image.width
@@ -214,7 +242,7 @@ class TableExtractor:
                     csv_path=str(csv_path) if csv_path else None,
                     html=html,
                     structure=structure,
-                    image_path=str(img_path)
+                    image_path=cloudinary_url
                 )
                 # Add extraction method metadata
                 table.extraction_method = "transformer"
@@ -296,115 +324,9 @@ class TableExtractor:
         
         return structure
     
-    async def _extract_with_pymupdf(self, pdf_path: Path) -> List[Table]:
-        """Enhanced PyMuPDF extraction with better structure analysis"""
-        tables = []
-        doc = fitz.open(str(pdf_path))
-        
-        for page_num, page in enumerate(doc, 1):
-            # Get page text with structure
-            blocks = page.get_text("dict")
-            
-            # Find potential table blocks
-            table_blocks = self._identify_table_blocks(blocks)
-            
-            for idx, table_block in enumerate(table_blocks):
-                # Extract table data
-                headers, rows = self._parse_table_block(table_block)
-                
-                if not headers and not rows:
-                    continue
-                
-                # Enhanced data cleaning and validation
-                cleaned_table = self._clean_and_validate_table_data([headers[0]] + rows if headers else rows)
-                if not cleaned_table:
-                    continue
-                
-                cleaned_headers, cleaned_rows = cleaned_table
-                
-                # Calculate bounding box
-                bbox = self._calculate_block_bbox(table_block)
-                
-                # Create and save table
-                table = self._create_table_object(
-                    cleaned_headers, cleaned_rows, page_num, idx, 
-                    BoundingBox(
-                        x1=bbox[0],
-                        y1=bbox[1],
-                        x2=bbox[2],
-                        y2=bbox[3],
-                        page=page_num,
-                        confidence=0.7
-                    ),
-                    "pymupdf"
-                )
-                tables.append(table)
-        
-        doc.close()
-        return tables
+
     
-    def _identify_table_blocks(self, blocks: Dict) -> List[Dict]:
-        """Identify blocks that likely contain tables"""
-        table_blocks = []
-        
-        for block in blocks.get("blocks", []):
-            if block.get("type") == 0:  # Text block
-                lines = block.get("lines", [])
-                
-                # Heuristics for table detection
-                if self._is_likely_table(lines):
-                    table_blocks.append(block)
-        
-        return table_blocks
-    
-    def _is_likely_table(self, lines: List[Dict]) -> bool:
-        """Check if lines likely form a table"""
-        if len(lines) < 2:
-            return False
-        
-        # Check for consistent column alignment
-        x_positions = []
-        for line in lines:
-            for span in line.get("spans", []):
-                x_positions.append(span.get("bbox", [0])[0])
-        
-        if not x_positions:
-            return False
-        
-        # Count unique x positions (potential columns)
-        unique_x = len(set(round(x, 1) for x in x_positions))
-        
-        # Tables typically have multiple columns
-        return unique_x >= 2 and len(lines) >= 3
-    
-    def _parse_table_block(self, block: Dict) -> tuple:
-        """Parse table structure from a text block"""
-        lines = block.get("lines", [])
-        if not lines:
-            return [], []
-        
-        # Group text by lines and x-position
-        rows_data = []
-        for line in lines:
-            row = []
-            for span in sorted(line.get("spans", []), key=lambda x: x.get("bbox", [0])[0]):
-                row.append(span.get("text", "").strip())
-            if row:
-                rows_data.append(row)
-        
-        if not rows_data:
-            return [], []
-        
-        # Assume first row is header
-        headers = [rows_data[0]] if rows_data else []
-        rows = rows_data[1:] if len(rows_data) > 1 else []
-        
-        return headers, rows
-    
-    def _calculate_block_bbox(self, block: Dict) -> tuple:
-        """Calculate bounding box for a block"""
-        bbox = block.get("bbox", [0, 0, 100, 100])
-        return tuple(bbox)
+
     
     async def _extract_cell_text(self, page, region: tuple, structure: Dict) -> tuple:
         """Extract text from table cells based on structure"""
@@ -1034,3 +956,19 @@ class TableExtractor:
             html=html,
             extraction_method=method
         )
+    
+    async def _extract_with_camelot(self, pdf_path: Path) -> List[Table]:
+        """Extract tables using Camelot"""
+        try:
+            return await camelot_extractor.extract(pdf_path)
+        except Exception as e:
+            logger.error(f"Camelot extraction failed: {e}")
+            return []
+    
+    async def _extract_with_tabula(self, pdf_path: Path) -> List[Table]:
+        """Extract tables using Tabula"""
+        try:
+            return await tabula_extractor.extract(pdf_path)
+        except Exception as e:
+            logger.error(f"Tabula extraction failed: {e}")
+            return []

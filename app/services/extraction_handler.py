@@ -15,6 +15,8 @@ from dataclasses import dataclass, asdict
 from app.config import settings
 from app.services.pipeline import ExtractionPipeline
 from app.services.b2_service import b2_service
+from app.services.cloudinary_service import cloudinary_service
+from app.services.local_storage_service import local_storage_service
 from app.models.schemas import ExtractionRequest, ExtractionResult
 from app.utils.helpers import validate_pdf
 from app.utils.exceptions import ExtractionError
@@ -196,12 +198,9 @@ class EnhancedExtractionHandler:
     ):
         """Process extraction with adaptive configuration and quality monitoring"""
         try:
-            # Analyze document characteristics for adaptive processing
-            doc_analysis = await self._analyze_document_characteristics(context.b2_url)
-
-            # Adapt configuration based on analysis and history
+            # Create adaptive request based on message and context
             adaptive_request = await self._create_adaptive_request(
-                message, doc_analysis, context
+                message, {}, context
             )
 
             # Download and validate PDF
@@ -279,52 +278,7 @@ class EnhancedExtractionHandler:
             if "pdf_path" in locals() and pdf_path.exists():
                 pdf_path.unlink(missing_ok=True)
 
-    async def _analyze_document_characteristics(self, b2_url: str) -> Dict[str, Any]:
-        """Analyze document characteristics for adaptive processing"""
-        try:
-            # Download a small sample for analysis
-            sample_size = min(
-                1024 * 1024, 10 * 1024 * 1024
-            )  # Up to 1MB sample, max 10MB
-            pdf_sample = await b2_service.download_pdf_sample(b2_url, sample_size)
 
-            analysis = {
-                "file_size": len(pdf_sample),
-                "is_large_file": len(pdf_sample) > 5 * 1024 * 1024,  # >5MB
-                "estimated_complexity": "medium",  # Default
-                "suggested_methods": ["grobid", "table_transformer", "pdffigures2"],
-                "processing_hints": {},
-            }
-
-            # Quick PDF structure analysis
-            if b"<<" in pdf_sample and b">>" in pdf_sample:
-                # Estimate complexity based on object count
-                object_count = pdf_sample.count(b"obj")
-                if object_count > 1000:
-                    analysis["estimated_complexity"] = "high"
-                    analysis["processing_hints"]["use_parallel"] = True
-                elif object_count < 100:
-                    analysis["estimated_complexity"] = "low"
-
-            # Check for image content
-            if b"/Image" in pdf_sample or b"/XObject" in pdf_sample:
-                analysis["has_images"] = True
-                analysis["suggested_methods"].append("cv_detection")
-
-            # Check for form fields (might indicate tables)
-            if b"/AcroForm" in pdf_sample or b"/Field" in pdf_sample:
-                analysis["has_forms"] = True
-                analysis["processing_hints"]["focus_tables"] = True
-
-            return analysis
-
-        except Exception as e:
-            logger.warning(f"Document analysis failed: {e}")
-            return {
-                "estimated_complexity": "medium",
-                "suggested_methods": ["grobid", "table_transformer"],
-                "processing_hints": {},
-            }
 
     async def _create_adaptive_request(
         self,
@@ -332,7 +286,7 @@ class EnhancedExtractionHandler:
         doc_analysis: Dict[str, Any],
         context: ProcessingContext,
     ) -> ExtractionRequest:
-        """Create adaptive extraction request based on analysis and performance history"""
+        """Create adaptive extraction request based on performance history"""
 
         # Base request from message
         request = ExtractionRequest(
@@ -345,15 +299,6 @@ class EnhancedExtractionHandler:
             use_ocr=message.get("useOcr", True),
             detect_entities=message.get("detectEntities", True),
         )
-
-        # Adapt based on document characteristics
-        if doc_analysis.get("is_large_file"):
-            request.timeout = self.adaptive_config.max_processing_time
-            # For large files, might want to be more selective
-            if doc_analysis.get("estimated_complexity") == "high":
-                request.use_ocr = (
-                    False  # Skip OCR for very complex large files initially
-                )
 
         # Adapt based on performance history
         if self.recent_performance:
@@ -725,6 +670,16 @@ class EnhancedExtractionHandler:
         # Save performance history
         await self._save_performance_history()
 
+        # Store locally if enabled
+        if settings.store_locally:
+            try:
+                stored_paths = await local_storage_service.store_extraction_result(
+                    result, context.job_id, context.paper_id
+                )
+                logger.info(f"Stored extraction result locally: {stored_paths}")
+            except Exception as e:
+                logger.error(f"Failed to store extraction result locally: {e}")
+        
         # Send completion message
         await self._send_completion_message(
             job_id=context.job_id,
@@ -769,6 +724,16 @@ class EnhancedExtractionHandler:
         }
 
         self.recent_performance.append(performance_record)
+
+        # Store locally if enabled
+        if settings.store_locally:
+            try:
+                stored_paths = await local_storage_service.store_extraction_result(
+                    result, context.job_id, context.paper_id
+                )
+                logger.info(f"Stored partial extraction result locally: {stored_paths}")
+            except Exception as e:
+                logger.error(f"Failed to store partial extraction result locally: {e}")
 
         await self._send_completion_message(
             job_id=context.job_id,

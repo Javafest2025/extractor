@@ -18,6 +18,7 @@ from app.models.schemas import Figure, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
 from app.services.ocr.ocr_manager import OCRManager
+from app.services.cloudinary_service import cloudinary_service
 
 
 @dataclass
@@ -101,7 +102,6 @@ class FigureExtractor:
         # Phase 1: Extract candidates from multiple methods
         extraction_methods = [
             ('pdffigures2', self._extract_with_pdffigures2),
-            ('pymupdf', self._extract_with_pymupdf),
             ('cv_detection', self._extract_with_cv_enhanced)
         ]
         
@@ -208,29 +208,7 @@ class FigureExtractor:
         
         return candidates
     
-    async def _extract_with_pymupdf(self, pdf_path: Path) -> List[FigureCandidate]:
-        """Enhanced PyMuPDF extraction with better image validation"""
-        candidates = []
-        doc = fitz.open(str(pdf_path))
-        
-        for page_num, page in enumerate(doc, 1):
-            # Get images on this page
-            image_list = page.get_images()
-            
-            for img_index, img in enumerate(image_list):
-                try:
-                    # Extract image with validation
-                    candidate = await self._process_pymupdf_image(
-                        doc, page, img, page_num, img_index
-                    )
-                    if candidate:
-                        candidates.append(candidate)
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to process image {img_index} from page {page_num}: {e}")
-        
-        doc.close()
-        return candidates
+
     
     async def _extract_with_cv(self, pdf_path: Path) -> List[FigureCandidate]:
         """
@@ -323,60 +301,7 @@ class FigureExtractor:
         
         return intersection / union if union > 0 else 0.0
 
-    # Enhanced validation and processing methods
-    async def _process_pymupdf_image(self, doc, page, img, page_num: int, 
-                                   img_index: int) -> Optional[FigureCandidate]:
-        """Process individual image from PyMuPDF with validation"""
-        # Extract image
-        xref = img[0]
-        pix = fitz.Pixmap(doc, xref)
-        
-        # Validate image dimensions
-        if pix.width < 50 or pix.height < 50:  # Too small
-            pix = None
-            return None
-        
-        # Convert to PIL Image for analysis
-        if pix.n - pix.alpha < 4:  # GRAY or RGB
-            img_data = pix.tobytes("png")
-        else:  # CMYK
-            pix = fitz.Pixmap(fitz.csRGB, pix)
-            img_data = pix.tobytes("png")
-        
-        # Analyze image content
-        img_array = np.frombuffer(img_data, dtype=np.uint8)
-        cv_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        
-        if not self._is_likely_figure_content(cv_img):
-            pix = None
-            return None
-        
-        # Save image
-        img_path = self.output_dir / f"pymupdf_page{page_num}_img{img_index}.png"
-        with open(img_path, 'wb') as f:
-            f.write(img_data)
-        
-        # Get image position on page
-        img_rect = page.get_image_bbox(img)
-        
-        candidate = FigureCandidate(
-            bbox=BoundingBox(
-                x1=img_rect.x0,
-                y1=img_rect.y0,
-                x2=img_rect.x1,
-                y2=img_rect.y1,
-                page=page_num,
-                confidence=0.8
-            ),
-            confidence=0.8,
-            method='pymupdf',
-            image_path=str(img_path),
-            label=f"Figure {page_num}.{img_index}",
-            page=page_num
-        )
-        
-        pix = None  # Clean up
-        return candidate
+
     
     def _is_likely_figure_content(self, img: np.ndarray) -> bool:
         """Enhanced heuristic to determine if image contains figure content"""
@@ -524,20 +449,20 @@ class FigureExtractor:
         height, width = img.shape[:2]
         
         # Method 1: Contour-based detection
-        contour_candidates = self._detect_figures_by_contours(img, gray, page_num, page)
+        contour_candidates = await self._detect_figures_by_contours(img, gray, page_num, page)
         candidates.extend(contour_candidates)
         
         # Method 2: Template matching for common figure patterns
-        template_candidates = self._detect_figures_by_templates(img, gray, page_num, page)
+        template_candidates = await self._detect_figures_by_templates(img, gray, page_num, page)
         candidates.extend(template_candidates)
         
         # Method 3: Connected component analysis
-        component_candidates = self._detect_figures_by_components(img, gray, page_num, page)
+        component_candidates = await self._detect_figures_by_components(img, gray, page_num, page)
         candidates.extend(component_candidates)
         
         return candidates
     
-    def _detect_figures_by_contours(self, img: np.ndarray, gray: np.ndarray, 
+    async def _detect_figures_by_contours(self, img: np.ndarray, gray: np.ndarray, 
                                   page_num: int, page) -> List[FigureCandidate]:
         """Detect figures using contour analysis"""
         candidates = []
@@ -564,13 +489,30 @@ class FigureExtractor:
             if (self.MIN_FIGURE_AREA < area < min(self.MAX_FIGURE_AREA, page_area * 0.4) and
                 self.MIN_ASPECT_RATIO < w/h < self.MAX_ASPECT_RATIO):
                 
+                # Expand boundary to capture full figure including captions and labels
+                expanded_bbox = self._expand_figure_boundary(img, gray, x, y, w, h, page_area)
+                if expanded_bbox:
+                    x, y, w, h = expanded_bbox
+                
                 # Extract region for validation
                 roi = img[y:y+h, x:x+w]
                 
                 if self._validate_figure_region(roi):
-                    # Save extracted figure
-                    fig_path = self.output_dir / f"cv_contour_page{page_num}_fig{idx}.png"
-                    cv2.imwrite(str(fig_path), roi)
+                    # CV contour images are good quality - upload them
+                    image_path = None
+                    if settings.store_locally:
+                        # Store locally in organized folder structure
+                        cv_contour_dir = self.output_dir / "figures" / "cv_contour"
+                        cv_contour_dir.mkdir(parents=True, exist_ok=True)
+                        img_path = cv_contour_dir / f"page{page_num}_fig{idx}.png"
+                        cv2.imwrite(str(img_path), roi)
+                        image_path = str(img_path)
+                        logger.debug(f"Stored CV contour image locally: {image_path}")
+                    else:
+                        # Upload to Cloudinary
+                        filename = f"cv_contour_page{page_num}_fig{idx}"
+                        image_path = await cloudinary_service.upload_cv_image(roi, filename, "scholarai/figures")
+                        logger.debug(f"Uploaded CV contour image to Cloudinary: {image_path}")
                     
                     # Convert coordinates to PDF space
                     scale = page.rect.width / width
@@ -586,7 +528,7 @@ class FigureExtractor:
                         ),
                         confidence=0.7,
                         method='cv_contour',
-                        image_path=str(fig_path),
+                        image_path=image_path,
                         label=f"Figure {page_num}.{idx}",
                         page=page_num
                     )
@@ -594,14 +536,152 @@ class FigureExtractor:
         
         return candidates
     
-    def _detect_figures_by_templates(self, img: np.ndarray, gray: np.ndarray, 
+    def _expand_figure_boundary(self, img: np.ndarray, gray: np.ndarray, 
+                               x: int, y: int, w: int, h: int, page_area: int) -> Optional[tuple]:
+        """Intelligently expand figure boundary to capture captions, labels, and sub-components"""
+        height, width = img.shape[:2]
+        
+        # Initial expansion factors
+        expand_x = int(w * 0.2)  # 20% horizontal expansion
+        expand_y = int(h * 0.3)  # 30% vertical expansion (more for captions)
+        
+        # Calculate new boundaries
+        new_x = max(0, x - expand_x)
+        new_y = max(0, y - expand_y)
+        new_w = min(width - new_x, w + 2 * expand_x)
+        new_h = min(height - new_y, h + 2 * expand_y)
+        
+        # Look for text content around the figure
+        text_regions = self._detect_text_regions_around_figure(gray, x, y, w, h)
+        
+        # Expand to include detected text regions
+        for tx, ty, tw, th in text_regions:
+                            # Check if text region is close to the figure
+            if self._is_text_region_near_figure(tx, ty, tw, th, x, y, w, h):
+                new_x = min(new_x, tx)
+                new_y = min(new_y, ty)
+                new_w = max(new_w, tx + tw - new_x)
+                new_h = max(new_h, ty + th - new_y)
+        
+        # Look for connected components that might be part of the figure
+        connected_regions = self._find_connected_figure_components(gray, x, y, w, h)
+        
+        # Expand to include connected components
+        for cx, cy, cw, ch in connected_regions:
+            new_x = min(new_x, cx)
+            new_y = min(new_y, cy)
+            new_w = max(new_w, cx + cw - new_x)
+            new_h = max(new_h, cy + ch - new_y)
+        
+        # Ensure boundaries don't exceed page limits
+        new_x = max(0, new_x)
+        new_y = max(0, new_y)
+        new_w = min(width - new_x, new_w)
+        new_h = min(height - new_y, new_h)
+        
+        # Validate expanded region
+        new_area = new_w * new_h
+        if new_area > page_area * 0.6:  # Don't expand too much
+            return None
+        
+        # Check if expansion is reasonable
+        expansion_ratio = new_area / (w * h)
+        if expansion_ratio > 3.0:  # Don't expand more than 3x
+            return None
+        
+        return (new_x, new_y, new_w, new_h)
+    
+    def _detect_text_regions_around_figure(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> List[tuple]:
+        """Detect text regions around the figure that might be captions or labels"""
+        text_regions = []
+        
+        # Define search area around the figure
+        search_margin = max(w, h) // 2
+        search_x = max(0, x - search_margin)
+        search_y = max(0, y - search_margin)
+        search_w = min(gray.shape[1] - search_x, w + 2 * search_margin)
+        search_h = min(gray.shape[0] - search_y, h + 2 * search_margin)
+        
+        # Extract search region
+        search_region = gray[search_y:search_y+search_h, search_x:search_x+search_w]
+        
+        # Use morphological operations to detect text-like patterns
+        # Horizontal lines (text baselines)
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+        horizontal_lines = cv2.morphologyEx(search_region, cv2.MORPH_OPEN, horizontal_kernel)
+        
+        # Find contours in horizontal lines
+        contours, _ = cv2.findContours(horizontal_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            tx, ty, tw, th = cv2.boundingRect(contour)
+            if tw > 50 and th > 5:  # Minimum text size
+                # Convert back to page coordinates
+                tx += search_x
+                ty += search_y
+                text_regions.append((tx, ty, tw, th))
+        
+        return text_regions
+    
+    def _is_text_region_near_figure(self, tx: int, ty: int, tw: int, th: int, 
+                                   fx: int, fy: int, fw: int, fh: int) -> bool:
+        """Check if text region is close to the figure"""
+        # Calculate centers
+        text_center_x = tx + tw // 2
+        text_center_y = ty + th // 2
+        figure_center_x = fx + fw // 2
+        figure_center_y = fy + fh // 2
+        
+        # Calculate distance
+        distance = ((text_center_x - figure_center_x) ** 2 + 
+                   (text_center_y - figure_center_y) ** 2) ** 0.5
+        
+        # Check if text is within reasonable distance
+        max_distance = max(fw, fh) * 1.5
+        return distance < max_distance
+    
+    def _find_connected_figure_components(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> List[tuple]:
+        """Find connected components that might be part of the figure"""
+        connected_regions = []
+        
+        # Define search area
+        search_margin = max(w, h) // 3
+        search_x = max(0, x - search_margin)
+        search_y = max(0, y - search_margin)
+        search_w = min(gray.shape[1] - search_x, w + 2 * search_margin)
+        search_h = min(gray.shape[0] - search_y, h + 2 * search_margin)
+        
+        # Extract search region
+        search_region = gray[search_y:search_y+search_h, search_x:search_x+search_w]
+        
+        # Threshold to create binary image
+        _, binary = cv2.threshold(search_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Find connected components
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
+        
+        for i in range(1, num_labels):  # Skip background
+            cx, cy, cw, ch, area = stats[i]
+            
+            # Check if component is reasonably sized and close to figure
+            if (area > 100 and area < w * h * 2 and  # Not too small or too large
+                self._is_text_region_near_figure(cx, cy, cw, ch, x-search_x, y-search_y, w, h)):
+                
+                # Convert back to page coordinates
+                cx += search_x
+                cy += search_y
+                connected_regions.append((cx, cy, cw, ch))
+        
+        return connected_regions
+    
+    async def _detect_figures_by_templates(self, img: np.ndarray, gray: np.ndarray, 
                                    page_num: int, page) -> List[FigureCandidate]:
         """Detect figures using template patterns common in academic papers"""
         candidates = []
         
-        # Template 1: Chart/graph patterns (look for axis-like structures)
-        axis_candidates = self._detect_chart_patterns(img, gray, page_num, page)
-        candidates.extend(axis_candidates)
+        # CV Chart detection disabled - other methods are sufficient
+        # axis_candidates = await self._detect_chart_patterns(img, gray, page_num, page)
+        # candidates.extend(axis_candidates)
         
         # Template 2: Diagram patterns (geometric shapes)
         diagram_candidates = self._detect_diagram_patterns(img, gray, page_num, page)
@@ -609,9 +689,9 @@ class FigureExtractor:
         
         return candidates
     
-    def _detect_chart_patterns(self, img: np.ndarray, gray: np.ndarray, 
+    async def _detect_chart_patterns(self, img: np.ndarray, gray: np.ndarray, 
                              page_num: int, page) -> List[FigureCandidate]:
-        """Detect chart/graph patterns"""
+        """Detect chart/graph patterns with improved algorithm to avoid fragmentation"""
         candidates = []
         
         # Look for perpendicular lines (axes)
@@ -630,32 +710,35 @@ class FigureExtractor:
         # Find regions around intersections
         contours, _ = cv2.findContours(intersections, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        for idx, contour in enumerate(contours):
-            # Expand region around intersection
-            x, y, w, h = cv2.boundingRect(contour)
-            
-            # Expand to capture full chart
-            expand_x = min(50, x)
-            expand_y = min(50, y)
-            expand_w = min(200, img.shape[1] - x - w)
-            expand_h = min(200, img.shape[0] - y - h)
-            
-            x -= expand_x
-            y -= expand_y
-            w += expand_x + expand_w
-            h += expand_y + expand_h
-            
+        # Group nearby intersections to avoid fragmentation
+        chart_regions = self._group_chart_regions(contours, img.shape)
+        
+        for idx, (x, y, w, h) in enumerate(chart_regions):
             area = w * h
             
-            if (self.MIN_FIGURE_AREA < area < self.MAX_FIGURE_AREA and
-                0.5 < w/h < 3.0):  # Reasonable chart aspect ratio
+            # Filter out very small fragments and ensure reasonable size
+            min_chart_area = 5000  # Minimum area for a chart (smaller than MIN_FIGURE_AREA)
+            
+            if (min_chart_area < area < self.MAX_FIGURE_AREA and
+                0.3 < w/h < 4.0):  # More flexible chart aspect ratio
                 
                 roi = img[y:y+h, x:x+w]
                 
                 if self._validate_chart_region(roi):
-                    # Save chart
-                    fig_path = self.output_dir / f"cv_chart_page{page_num}_fig{idx}.png"
-                    cv2.imwrite(str(fig_path), roi)
+                    # Skip CV chart images for now (they contain more text content than figures)
+                    # TODO: Improve chart detection to filter out text-heavy regions
+                    image_path = None
+                    if settings.store_locally:
+                        # Store locally in organized folder structure for analysis
+                        cv_chart_dir = self.output_dir / "figures" / "cv_chart"
+                        cv_chart_dir.mkdir(parents=True, exist_ok=True)
+                        img_path = cv_chart_dir / f"page{page_num}_fig{idx}.png"
+                        cv2.imwrite(str(img_path), roi)
+                        image_path = str(img_path)
+                        logger.debug(f"Stored CV chart image locally (for analysis): {image_path}")
+                    else:
+                        # Skip upload for now
+                        logger.debug(f"Skipping CV chart image upload (text-heavy): page{page_num}_fig{idx}")
                     
                     scale = page.rect.width / img.shape[1]
                     
@@ -670,13 +753,78 @@ class FigureExtractor:
                         ),
                         confidence=0.75,
                         method='cv_chart',
-                        image_path=str(fig_path),
+                        image_path=image_path,
                         label=f"Chart {page_num}.{idx}",
                         page=page_num
                     )
                     candidates.append(candidate)
         
         return candidates
+    
+    def _group_chart_regions(self, contours: List, img_shape: tuple) -> List[tuple]:
+        """Group nearby chart intersections to avoid fragmentation"""
+        if not contours:
+            return []
+        
+        # Get bounding boxes for all contours
+        regions = []
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            regions.append((x, y, w, h))
+        
+        # Sort by area (largest first) to prioritize bigger regions
+        regions.sort(key=lambda r: r[2] * r[3], reverse=True)
+        
+        # Group overlapping or nearby regions
+        merged_regions = []
+        used = set()
+        
+        for i, (x1, y1, w1, h1) in enumerate(regions):
+            if i in used:
+                continue
+                
+            # Start with current region
+            merged_x, merged_y = x1, y1
+            merged_w, merged_h = w1, h1
+            used.add(i)
+            
+            # Look for nearby regions to merge
+            for j, (x2, y2, w2, h2) in enumerate(regions[i+1:], i+1):
+                if j in used:
+                    continue
+                
+                # Check if regions are close enough to merge
+                distance_threshold = 100  # pixels
+                
+                # Calculate center points
+                cx1, cy1 = x1 + w1//2, y1 + h1//2
+                cx2, cy2 = x2 + w2//2, y2 + h2//2
+                
+                # Calculate distance between centers
+                distance = ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+                
+                # Check for overlap or proximity
+                overlap = (x1 < x2 + w2 and x2 < x1 + w1 and 
+                          y1 < y2 + h2 and y2 < y1 + h1)
+                
+                if overlap or distance < distance_threshold:
+                    # Merge regions
+                    merged_x = min(merged_x, x2)
+                    merged_y = min(merged_y, y2)
+                    merged_w = max(merged_x + merged_w, x2 + w2) - merged_x
+                    merged_h = max(merged_y + merged_h, y2 + h2) - merged_y
+                    used.add(j)
+            
+            # Add some padding to capture full chart
+            padding = 50
+            merged_x = max(0, merged_x - padding)
+            merged_y = max(0, merged_y - padding)
+            merged_w = min(img_shape[1] - merged_x, merged_w + 2 * padding)
+            merged_h = min(img_shape[0] - merged_y, merged_h + 2 * padding)
+            
+            merged_regions.append((merged_x, merged_y, merged_w, merged_h))
+        
+        return merged_regions
     
     def _validate_chart_region(self, roi: np.ndarray) -> bool:
         """Validate if region contains chart-like content"""
@@ -685,12 +833,46 @@ class FigureExtractor:
         
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
         
-        # Look for data points or line patterns
+        # Calculate various features to distinguish charts from text
+        score = 0
+        
+        # 1. Edge density analysis
         edges = cv2.Canny(gray_roi, 30, 100)
         edge_density = np.count_nonzero(edges) / edges.size
         
-        # Charts typically have moderate edge density
-        return 0.05 <= edge_density <= 0.25
+        # Charts typically have moderate edge density (not too sparse, not too dense)
+        if 0.03 <= edge_density <= 0.3:
+            score += 1
+        
+        # 2. Line detection (charts have more lines than text)
+        lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=30)
+        if lines is not None and len(lines) > 5:
+            score += 1
+        
+        # 3. Text content analysis (charts should have less text than figures)
+        text_likelihood = self._estimate_text_content(gray_roi)
+        if text_likelihood < 0.6:  # Lower threshold for charts
+            score += 1
+        
+        # 4. Variance analysis (charts have more visual variation than text)
+        variance = np.var(gray_roi)
+        if variance > 150:  # Charts have more variation
+            score += 1
+        
+        # 5. Aspect ratio check (charts are often wider than tall)
+        h, w = gray_roi.shape
+        aspect_ratio = w / h
+        if 0.5 <= aspect_ratio <= 3.0:  # Reasonable chart aspect ratio
+            score += 1
+        
+        # 6. Color diversity (charts often have multiple colors)
+        if len(roi.shape) == 3:
+            unique_colors = len(np.unique(roi.reshape(-1, roi.shape[2]), axis=0))
+            if unique_colors > 30:  # Charts have more colors
+                score += 1
+        
+        # Require at least 4 positive indicators for a chart
+        return score >= 4
     
     def _detect_diagram_patterns(self, img: np.ndarray, gray: np.ndarray, 
                                page_num: int, page) -> List[FigureCandidate]:
@@ -699,7 +881,7 @@ class FigureExtractor:
         # For now, return empty list
         return []
     
-    def _detect_figures_by_components(self, img: np.ndarray, gray: np.ndarray, 
+    async def _detect_figures_by_components(self, img: np.ndarray, gray: np.ndarray, 
                                     page_num: int, page) -> List[FigureCandidate]:
         """Detect figures using connected component analysis"""
         candidates = []
@@ -716,6 +898,12 @@ class FigureExtractor:
             if (self.MIN_FIGURE_AREA < area < self.MAX_FIGURE_AREA and
                 self.MIN_ASPECT_RATIO < w/h < self.MAX_ASPECT_RATIO):
                 
+                # Expand boundary to capture full figure including captions and labels
+                page_area = img.shape[0] * img.shape[1]
+                expanded_bbox = self._expand_figure_boundary(img, gray, x, y, w, h, page_area)
+                if expanded_bbox:
+                    x, y, w, h = expanded_bbox
+                
                 # Create mask for this component
                 component_mask = (labels == i).astype(np.uint8) * 255
                 
@@ -723,8 +911,21 @@ class FigureExtractor:
                 roi = img[y:y+h, x:x+w]
                 
                 if self._validate_component_region(roi, component_mask[y:y+h, x:x+w]):
-                    fig_path = self.output_dir / f"cv_component_page{page_num}_fig{i}.png"
-                    cv2.imwrite(str(fig_path), roi)
+                    # CV component images are decent quality - upload them
+                    image_path = None
+                    if settings.store_locally:
+                        # Store locally in organized folder structure
+                        cv_component_dir = self.output_dir / "figures" / "cv_component"
+                        cv_component_dir.mkdir(parents=True, exist_ok=True)
+                        img_path = cv_component_dir / f"page{page_num}_fig{i}.png"
+                        cv2.imwrite(str(img_path), roi)
+                        image_path = str(img_path)
+                        logger.debug(f"Stored CV component image locally: {image_path}")
+                    else:
+                        # Upload to Cloudinary
+                        filename = f"cv_component_page{page_num}_fig{i}"
+                        image_path = await cloudinary_service.upload_cv_image(roi, filename, "scholarai/figures")
+                        logger.debug(f"Uploaded CV component image to Cloudinary: {image_path}")
                     
                     scale = page.rect.width / img.shape[1]
                     
@@ -739,7 +940,7 @@ class FigureExtractor:
                         ),
                         confidence=0.65,
                         method='cv_component',
-                        image_path=str(fig_path),
+                        image_path=image_path,
                         label=f"Component {page_num}.{i}",
                         page=page_num
                     )
@@ -759,12 +960,68 @@ class FigureExtractor:
         return 0.1 <= mask_ratio <= 0.7
     
     def _validate_figure_region(self, roi: np.ndarray) -> bool:
-        """General validation for figure regions"""
+        """General validation for figure regions with improved tolerance for expanded boundaries"""
         if roi.size == 0:
             return False
         
-        # Use the same validation as _is_likely_figure_content
-        return self._is_likely_figure_content(roi)
+        # For expanded boundaries, be more lenient with validation
+        # since they may include captions and labels
+        return self._is_likely_figure_content_expanded(roi)
+    
+    def _is_likely_figure_content_expanded(self, img: np.ndarray) -> bool:
+        """Enhanced validation for expanded figure regions that may include captions"""
+        if img is None or img.size == 0:
+            return False
+        
+        height, width = img.shape[:2]
+        
+        # More lenient size validation for expanded regions
+        area = width * height
+        if area < self.MIN_FIGURE_AREA * 0.5 or area > self.MAX_FIGURE_AREA * 1.5:
+            return False
+        
+        # More flexible aspect ratio for expanded regions
+        aspect_ratio = width / height
+        if aspect_ratio < 0.2 or aspect_ratio > 5.0:  # Much more flexible
+            return False
+        
+        # Convert to grayscale for analysis
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
+        
+        # Content analysis with lower thresholds
+        score = 0
+        
+        # 1. Edge density (more lenient for expanded regions)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_ratio = np.count_nonzero(edges) / edges.size
+        if 0.01 <= edge_ratio <= 0.4:  # More lenient range
+            score += 1
+        
+        # 2. Variance (figures have variation, not uniform backgrounds)
+        variance = np.var(gray)
+        if variance > 100:  # Lower threshold
+            score += 1
+        
+        # 3. Color diversity (figures often have multiple colors)
+        if len(img.shape) == 3:
+            unique_colors = len(np.unique(img.reshape(-1, img.shape[2]), axis=0))
+            if unique_colors > 20:  # Lower threshold
+                score += 1
+        
+        # 4. Text content analysis (expanded regions may have more text)
+        text_likelihood = self._estimate_text_content(gray)
+        if text_likelihood < 0.8:  # Higher threshold (more text allowed)
+            score += 1
+        
+        # 5. Geometric shapes detection
+        if self._detect_geometric_patterns(gray):
+            score += 1
+        
+        # Require at least 2 positive indicators (lower threshold)
+        return score >= 2
 
     # Caption detection and validation methods
     async def _detect_captions(self, candidates: List[FigureCandidate], 
@@ -1037,7 +1294,6 @@ class FigureExtractor:
         """Get confidence score based on extraction method"""
         method_scores = {
             'pdffigures2': 0.9,
-            'pymupdf': 0.8,
             'cv_contour': 0.7,
             'cv_chart': 0.75,
             'cv_component': 0.6
@@ -1166,7 +1422,5 @@ class FigureExtractor:
             return 'chart'
         elif 'diagram' in candidate.method:
             return 'diagram'
-        elif candidate.method == 'pymupdf':
-            return 'embedded_image'
         else:
             return 'figure'

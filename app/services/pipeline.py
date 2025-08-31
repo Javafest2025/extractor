@@ -22,6 +22,7 @@ from app.services.extractors.figure_extractor import FigureExtractor
 from app.services.extractors.table_extractor import TableExtractor
 from app.services.extractors.ocr_math_extractor import OCRMathExtractor
 from app.services.extractors.code_extractor import CodeExtractor
+from app.services.local_storage_service import local_storage_service
 from app.utils.exceptions import ExtractionError
 
 
@@ -585,7 +586,7 @@ class ExtractionPipeline:
             return 0
     
     async def _save_result(self, result: ExtractionResult):
-        """Save extraction result to JSON file"""
+        """Save extraction result to JSON file and local storage"""
         output_path = settings.paper_folder / f"{Path(result.pdf_path).stem}_extraction.json"
         
         # Convert to dict
@@ -596,6 +597,20 @@ class ExtractionPipeline:
             json.dump(result_dict, f, indent=2, ensure_ascii=False, default=str)
         
         logger.info(f"Extraction result saved to {output_path}")
+        
+        # Store locally if enabled
+        if settings.store_locally:
+            try:
+                # Generate a job_id and paper_id for local storage
+                job_id = f"pipeline_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                paper_id = Path(result.pdf_path).stem
+                
+                stored_paths = await local_storage_service.store_extraction_result(
+                    result, job_id, paper_id
+                )
+                logger.info(f"Stored extraction result locally: {stored_paths}")
+            except Exception as e:
+                logger.error(f"Failed to store extraction result locally: {e}")
 
     # Enhanced quality assessment and auto-correction methods
     async def _assess_initial_quality(self, result: ExtractionResult) -> Dict[str, Any]:

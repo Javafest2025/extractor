@@ -6,7 +6,6 @@ from loguru import logger
 
 from .base_ocr import BaseOCRService, OCRResult
 from .easyocr_service import EasyOCRService
-from .paddleocr_service import PaddleOCRService
 
 
 class OCRManager:
@@ -22,10 +21,9 @@ class OCRManager:
     def _initialize_providers(self, **kwargs):
         """Initialize available OCR providers in order of preference"""
         
-        # Provider priority order (free local options only)
+        # Provider priority order (EasyOCR only)
         provider_classes = [
             EasyOCRService,      # Local, no external dependencies
-            PaddleOCRService,    # Local, fast and accurate
         ]
         
         for provider_class in provider_classes:

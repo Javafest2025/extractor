@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # Gemini API
     gemini_api_key: Optional[str] = None
     
+    # Cloudinary Configuration
+    cloudinary_url: Optional[str] = None
+    
+    # Storage Configuration
+    store_locally: bool = True
+    
     # RabbitMQ Configuration
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672

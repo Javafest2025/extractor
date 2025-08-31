@@ -22,6 +22,7 @@ from app.models.schemas import (
 )
 from app.services.pipeline import ExtractionPipeline
 from app.services.b2_service import b2_service
+from app.services.cloudinary_service import cloudinary_service
 from app.services.messaging import ScholarAIConsumer
 from app.services.extraction_handler import enhanced_extraction_handler
 from app.utils.helpers import validate_pdf, get_pdf_info, create_extraction_summary
@@ -62,6 +63,12 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Failed to initialize B2 service: {e}")
         else:
             logger.info("B2 credentials not configured, B2 functionality will be disabled")
+        
+        # Initialize Cloudinary service if configured
+        if cloudinary_service.is_service_available():
+            logger.info("Cloudinary service initialized successfully")
+        else:
+            logger.info("Cloudinary not configured, image uploads will be disabled")
         
         # Initialize RabbitMQ consumer if credentials are available
         if settings.rabbitmq_user and settings.rabbitmq_password:

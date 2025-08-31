@@ -13,6 +13,8 @@ RUN apt-get update && \
     g++ \
     cmake \
     pkg-config \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -34,6 +36,7 @@ FROM python:3.11-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
+    wget \
     # OpenCV dependencies (runtime only)
     libgl1 \
     libglib2.0-0 \
@@ -51,6 +54,8 @@ RUN apt-get update && \
     # Additional system libraries
     libgcc-s1 \
     libstdc++6 \
+    # Java for PDFFigures2 (if needed)
+    default-jre \
     && rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -65,10 +70,10 @@ RUN mkdir -p /app/cache /app/paper /app/logs /home/app/.cache && \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Set environment variables for HuggingFace cache
-ENV TRANSFORMERS_CACHE="/app/cache/transformers"
+# Set environment variables for HuggingFace cache and EasyOCR
 ENV HF_HOME="/app/cache/huggingface"
 ENV TORCH_HOME="/app/cache/torch"
+ENV EASYOCR_MODULE_PATH="/app/cache/easyocr"
 
 # Set working directory
 WORKDIR /app
@@ -78,7 +83,7 @@ COPY app/ ./app/
 COPY scripts/ ./scripts/
 
 # Create necessary directories and set permissions
-RUN mkdir -p ./paper/uploads ./paper/results ./cache/transformers ./cache/huggingface ./cache/torch ./logs && \
+RUN mkdir -p ./paper/uploads ./paper/results ./paper/figures ./paper/tables ./paper/json ./paper/text/sections ./paper/text/subsections ./paper/code ./paper/ocr_math ./cache/huggingface ./cache/torch ./cache/easyocr ./logs && \
     chown -R app:app /app
 
 # Switch to non-root user

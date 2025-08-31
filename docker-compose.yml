@@ -15,9 +15,14 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RABBITMQ_HOST=user-rabbitmq
       - RABBITMQ_PORT=5672
+      - HF_HOME=/app/cache/huggingface
+      - TORCH_HOME=/app/cache/torch
+      - EASYOCR_MODULE_PATH=/app/cache/easyocr
     volumes:
       - ./paper:/app/paper
       - ./logs:/app/logs
+      - ./cache:/app/cache
+      - ./uploads:/app/uploads
     networks:
       - scholarai-network
     restart: unless-stopped
@@ -27,6 +32,26 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    depends_on:
+      - user-rabbitmq
+
+  user-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: user-rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - scholarai-network
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
 
 # Connect to existing network from main orchestration
 networks:
