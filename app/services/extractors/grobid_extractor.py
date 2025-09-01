@@ -443,7 +443,7 @@ class GROBIDExtractor:
         return references
     
     def _parse_reference(self, bibl: ET.Element) -> Optional[Reference]:
-        """Parse a single bibliographic reference"""
+        """Parse a single bibliographic reference with enhanced citation details"""
         # Title
         title_elem = bibl.find('.//tei:title', self.NAMESPACES)
         title = title_elem.text if title_elem is not None else None
@@ -496,11 +496,83 @@ class GROBIDExtractor:
         if not raw_text and not title:
             return None
         
+        # Extract citation details from the document
+        cited_by_sections = self._find_citation_sections(bibl, title, authors)
+        
         return Reference(
             raw_text=raw_text or "",
             title=title,
             authors=authors,
             year=year,
             venue=venue,
-            doi=doi
+            doi=doi,
+            cited_by_sections=cited_by_sections
         )
+    
+    def _find_citation_sections(self, bibl: ET.Element, title: str, authors: List[str]) -> List[str]:
+        """Find sections where this reference is cited"""
+        try:
+            # Since ElementTree doesn't have getparent(), we'll use a simpler approach
+            # Look for citations in the current bibliography element and its context
+            cited_sections = []
+            
+            # Generate citation patterns
+            citation_patterns = self._generate_citation_patterns(title, authors)
+            
+            # Search for citations in the current element and its siblings
+            # This is a simplified approach that avoids the getparent() issue
+            current_element = bibl
+            
+            # Try to find the document root by looking for common parent elements
+            # Look for body, div, or other structural elements
+            for elem in current_element.iter():
+                if elem.tag.endswith('body') or elem.tag.endswith('div'):
+                    # Check if this element contains citation patterns
+                    elem_text = self._extract_text_from_element(elem)
+                    if elem_text:
+                        for pattern in citation_patterns:
+                            if re.search(pattern, elem_text, re.IGNORECASE):
+                                # Try to get section title
+                                head = elem.find('.//tei:head', self.NAMESPACES)
+                                if head is not None and head.text:
+                                    section_title = head.text.strip()
+                                    if section_title and section_title not in cited_sections:
+                                        cited_sections.append(section_title)
+                                break
+            
+            return cited_sections
+            
+        except Exception as e:
+            logger.warning(f"Failed to find citation sections: {e}")
+            return []
+    
+    def _generate_citation_patterns(self, title: str, authors: List[str]) -> List[str]:
+        """Generate patterns to search for citations of this reference"""
+        patterns = []
+        
+        if title:
+            # Extract key words from title (first 3-5 words)
+            title_words = title.split()[:5]
+            if len(title_words) >= 3:
+                title_pattern = r'\b' + r'\s+'.join(title_words) + r'\b'
+                patterns.append(title_pattern)
+        
+        if authors:
+            # Use first author's last name
+            first_author = authors[0]
+            last_name = first_author.split()[-1] if first_author else ""
+            if last_name:
+                # Look for author citations like "Smith et al." or "Smith (2020)"
+                author_patterns = [
+                    rf'\b{last_name}\s+et\s+al\.',
+                    rf'\b{last_name}\s*\(\d{{4}}\)',
+                    rf'\b{last_name}\s+and\s+',
+                    rf'\b{last_name}\s*,\s*\d{{4}}'
+                ]
+                patterns.extend(author_patterns)
+        
+        return patterns
+
+
+# Global instance
+grobid_extractor = GROBIDExtractor()

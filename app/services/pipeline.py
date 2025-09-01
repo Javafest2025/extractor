@@ -133,6 +133,16 @@ class ExtractionPipeline:
         
         # Calculate processing time and finalize
         result.processing_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Set extraction methods used
+        result.extraction_methods = list(extraction_tasks.keys())
+        
+        # Calculate confidence scores
+        result.confidence_scores = self._calculate_confidence_scores(result, extraction_tasks)
+        
+        # Calculate extraction coverage
+        result.extraction_coverage = self._calculate_extraction_coverage(result)
+        
         await self._save_result(result, skip_local_storage)
         
         return result
@@ -839,18 +849,29 @@ class ExtractionPipeline:
         return matched_figures / len(result.figures)
     
     def _calculate_overall_quality_score(self, quality_issues: List[Dict]) -> float:
-        """Calculate overall quality score based on issues"""
-        base_score = 1.0
+        """Calculate overall quality score based on issues and content coverage"""
+        # Start with a dynamic base score based on content extraction success
+        base_score = 0.5  # Start lower and build up
         
+        # Add points for successful extractions
+        if hasattr(self, 'extraction_results') and self.extraction_results:
+            successful_extractions = sum(1 for result in self.extraction_results.values() 
+                                       if result.get('success', False))
+            total_extractions = len(self.extraction_results)
+            if total_extractions > 0:
+                base_score += 0.3 * (successful_extractions / total_extractions)
+        
+        # Subtract points for issues
         for issue in quality_issues:
             if issue['severity'] == 'high':
-                base_score -= 0.3
-            elif issue['severity'] == 'medium':
                 base_score -= 0.2
-            elif issue['severity'] == 'low':
+            elif issue['severity'] == 'medium':
                 base_score -= 0.1
+            elif issue['severity'] == 'low':
+                base_score -= 0.05
         
-        return max(0.0, base_score)
+        # Ensure score is between 0.0 and 1.0
+        return max(0.0, min(1.0, base_score))
     
     async def _auto_correct_extraction(self, result: ExtractionResult, 
                                      quality_assessment: Dict[str, Any]) -> ExtractionResult:
@@ -1057,6 +1078,113 @@ class ExtractionPipeline:
                         para['page'] = total_pages
         
         return result
+    
+    def _calculate_confidence_scores(self, result: ExtractionResult, extraction_tasks: Dict[str, Any]) -> Dict[str, float]:
+        """Calculate confidence scores for each extraction method"""
+        confidence_scores = {}
+        
+        # Base confidence scores for different methods
+        method_confidence = {
+            'grobid': 0.9,
+            'text_fallback': 0.7,
+            'transformer': 0.85,
+            'pdfplumber': 0.8,
+            'camelot': 0.75,
+            'tabula': 0.7,
+            'pdffigures2': 0.9,
+            'cv_contour': 0.6,
+            'cv_component': 0.65,
+            'cv_chart': 0.5,
+            'nougat_tesseract': 0.8,
+            'ocr_math': 0.7
+        }
+        
+        for method_name, task_result in extraction_tasks.items():
+            if task_result.get('success', False):
+                # Get base confidence for this method
+                base_confidence = method_confidence.get(method_name, 0.5)
+                
+                # Adjust based on content quality
+                content_quality = self._assess_content_quality(method_name, task_result)
+                
+                # Final confidence score
+                confidence_scores[method_name] = base_confidence * content_quality
+            else:
+                confidence_scores[method_name] = 0.0
+        
+        return confidence_scores
+    
+    def _assess_content_quality(self, method_name: str, task_result: Dict[str, Any]) -> float:
+        """Assess the quality of extracted content"""
+        data = task_result.get('data', {})
+        
+        if method_name in ['grobid', 'text_fallback']:
+            # Assess text quality
+            sections = data.get('sections', [])
+            if sections:
+                # Check for substantial content
+                total_text_length = sum(len(str(para.text)) for section in sections 
+                                      for para in section.paragraphs)
+                return min(1.0, total_text_length / 1000)  # Normalize by expected length
+            return 0.5
+        
+        elif method_name in ['transformer', 'pdfplumber', 'camelot', 'tabula']:
+            # Assess table quality
+            tables = data if isinstance(data, list) else data.get('tables', [])
+            if tables:
+                # Check for tables with substantial content
+                valid_tables = sum(1 for table in tables 
+                                 if table.rows and len(table.rows) > 1)
+                return valid_tables / len(tables) if tables else 0.0
+            return 0.5
+        
+        elif method_name in ['pdffigures2', 'cv_contour', 'cv_component', 'cv_chart']:
+            # Assess figure quality
+            figures = data if isinstance(data, list) else data.get('figures', [])
+            if figures:
+                # Check for figures with captions or substantial content
+                valid_figures = sum(1 for fig in figures 
+                                  if fig.caption or fig.ocr_text)
+                return valid_figures / len(figures) if figures else 0.0
+            return 0.5
+        
+        return 0.5  # Default quality score
+    
+    def _calculate_extraction_coverage(self, result: ExtractionResult) -> float:
+        """Calculate overall extraction coverage"""
+        coverage_scores = []
+        
+        # Text coverage
+        if result.sections:
+            total_paragraphs = sum(len(section.paragraphs) for section in result.sections)
+            if total_paragraphs > 0:
+                coverage_scores.append(min(1.0, total_paragraphs / 50))  # Normalize by expected paragraphs
+        
+        # Table coverage
+        if result.tables:
+            coverage_scores.append(min(1.0, len(result.tables) / 10))  # Normalize by expected tables
+        
+        # Figure coverage
+        if result.figures:
+            coverage_scores.append(min(1.0, len(result.figures) / 15))  # Normalize by expected figures
+        
+        # Equation coverage
+        if result.equations:
+            coverage_scores.append(min(1.0, len(result.equations) / 20))  # Normalize by expected equations
+        
+        # Code coverage
+        if result.code_blocks:
+            coverage_scores.append(min(1.0, len(result.code_blocks) / 5))  # Normalize by expected code blocks
+        
+        # Reference coverage
+        if result.references:
+            coverage_scores.append(min(1.0, len(result.references) / 30))  # Normalize by expected references
+        
+        # Calculate overall coverage
+        if coverage_scores:
+            return sum(coverage_scores) / len(coverage_scores)
+        else:
+            return 0.0
     
     async def _reconstruct_text_flow(self, sections: List[Section]) -> List[Section]:
         """Reconstruct proper text reading order"""

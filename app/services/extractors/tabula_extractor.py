@@ -108,6 +108,31 @@ class TabulaExtractor:
                             confidence=0.7  # Default confidence
                         )
                         
+                        # Create CSV file and upload to Cloudinary
+                        csv_path = None
+                        cloudinary_csv_url = None
+                        try:
+                            from pathlib import Path
+                            
+                            # Create output directory if it doesn't exist
+                            output_dir = Path("paper/tables")
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            # Save as CSV
+                            csv_path = output_dir / f"tabula_page{page_idx + 1}_table{table_idx}.csv"
+                            df.to_csv(csv_path, index=False)
+                            
+                            # Upload CSV to Cloudinary
+                            cloudinary_csv_url = await cloudinary_service.upload_file(
+                                str(csv_path), 
+                                folder="tables/csv",
+                                public_id=f"tabula_page{page_idx + 1}_table{table_idx}_data"
+                            )
+                            logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                            
+                        except Exception as e:
+                            logger.warning(f"Failed to create/upload CSV for Tabula table: {e}")
+                        
                         # Create table image (Tabula doesn't provide images directly)
                         # We'll skip image creation for Tabula
                         image_path = None
@@ -119,6 +144,7 @@ class TabulaExtractor:
                             bbox=bbox_obj,
                             headers=[headers] if headers else [],
                             rows=rows,
+                            csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
                             extraction_method="tabula",
                             image_path=image_path,
                             confidence=0.7  # Default confidence

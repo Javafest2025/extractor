@@ -43,10 +43,10 @@ class TableExtractor:
         self.device = "cuda" if torch.cuda.is_available() and settings.use_gpu else "cpu"
         
         # Validation thresholds
-        self.TABLE_CONFIDENCE_THRESHOLD = 0.5  # Lowered from 0.75 to be more permissive
+        self.TABLE_CONFIDENCE_THRESHOLD = 0.3  # Lowered further to be more permissive for real tables
         self.PROSE_LIKELIHOOD_THRESHOLD = 0.6
-        self.MIN_TABLE_ROWS = 2
-        self.MIN_TABLE_COLS = 2
+        self.MIN_TABLE_ROWS = 1  # More permissive: allow tables with just 1 row
+        self.MIN_TABLE_COLS = 1  # More permissive: allow tables with just 1 column
         
         self._init_models()
     
@@ -141,7 +141,7 @@ class TableExtractor:
                     bbox = self._estimate_table_bbox(page, table_data, page_num)
                     
                     # Create and save table
-                    table = self._create_table_object(
+                    table = await self._create_table_object(
                         headers, rows, page_num, idx, bbox, "pdfplumber"
                     )
                     tables.append(table)
@@ -226,6 +226,22 @@ class TableExtractor:
                 # Convert coordinates to PDF space
                 scale = page.rect.width / pil_image.width
                 
+                # Extract table caption and references
+                caption, references = await self._extract_table_caption_and_references(pdf_path, page_num, x1, y1, x2, y2)
+                
+                # Upload CSV to Cloudinary if available
+                cloudinary_csv_url = None
+                if csv_path and csv_path.exists():
+                    try:
+                        cloudinary_csv_url = await cloudinary_service.upload_file(
+                            str(csv_path), 
+                            folder="tables/csv",
+                            public_id=f"table_{page_num}_{idx}_data"
+                        )
+                        logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                    except Exception as e:
+                        logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
+                
                 table = Table(
                     label=f"Table {page_num}.{idx}",
                     page=page_num,
@@ -239,10 +255,12 @@ class TableExtractor:
                     ),
                     headers=headers,
                     rows=rows,
-                    csv_path=str(csv_path) if csv_path else None,
+                    csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
                     html=html,
                     structure=structure,
-                    image_path=cloudinary_url
+                    image_path=cloudinary_url,
+                    caption=caption,
+                    references=references
                 )
                 # Add extraction method metadata
                 table.extraction_method = "transformer"
@@ -250,6 +268,76 @@ class TableExtractor:
         
         doc.close()
         return tables
+    
+    async def _extract_table_caption_and_references(self, pdf_path: Path, page_num: int, x1: int, y1: int, x2: int, y2: int) -> Tuple[str, List[str]]:
+        """Extract table caption and references from surrounding text"""
+        try:
+            import fitz
+            
+            doc = fitz.open(str(pdf_path))
+            page = doc.load_page(page_num - 1)  # 0-based indexing
+            
+            # Get text blocks around the table
+            text_blocks = page.get_text("dict")["blocks"]
+            
+            caption = ""
+            references = []
+            
+            # Look for caption above the table (within 100 points)
+            table_top = y1
+            caption_candidates = []
+            
+            for block in text_blocks:
+                if "lines" in block:
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            text = span["text"].strip()
+                            span_y = span["bbox"][1]  # Top of text span
+                            
+                            # Check if text is above the table and close
+                            if span_y < table_top and (table_top - span_y) < 100:
+                                # Look for caption patterns
+                                if re.match(r'^(Table|Tab\.?)\s*\d+', text, re.IGNORECASE):
+                                    caption_candidates.append(text)
+                                elif text and len(text) > 10 and len(text) < 200:
+                                    # Might be a caption
+                                    caption_candidates.append(text)
+            
+            # Select the best caption candidate
+            if caption_candidates:
+                # Prefer text that starts with "Table"
+                for candidate in caption_candidates:
+                    if re.match(r'^(Table|Tab\.?)\s*\d+', candidate, re.IGNORECASE):
+                        caption = candidate
+                        break
+                else:
+                    # Use the first substantial candidate
+                    caption = caption_candidates[0]
+            
+            # Look for references in the text
+            page_text = page.get_text()
+            
+            # Find table references in the text
+            table_ref_patterns = [
+                r'Table\s+(\d+)',
+                r'Tab\.?\s*(\d+)',
+                r'see\s+Table\s+(\d+)',
+                r'refer\s+to\s+Table\s+(\d+)'
+            ]
+            
+            for pattern in table_ref_patterns:
+                matches = re.finditer(pattern, page_text, re.IGNORECASE)
+                for match in matches:
+                    ref_text = match.group(0)
+                    if ref_text not in references:
+                        references.append(ref_text)
+            
+            doc.close()
+            return caption, references
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract table caption and references: {e}")
+            return "", []
     
     async def _detect_tables(self, image: Image.Image) -> List[tuple]:
         """Detect table regions in an image using Table Transformer"""
@@ -515,46 +603,29 @@ class TableExtractor:
         return scores
     
     def _validate_visual_structure(self, table: Table) -> float:
-        """Validate visual structure consistency"""
+        """Validate visual structure consistency - simplified and more permissive"""
         if not table.headers or not table.rows:
             return 0.0
         
         score = 0.0
         
-        # Check column consistency
-        if table.headers:
-            header_cols = len(table.headers[0])
-            if header_cols >= self.MIN_TABLE_COLS:
-                score += 0.3
-                
-                # Check if all rows have similar column count
-                if table.rows:
-                    row_lengths = [len(row) for row in table.rows]
-                    if row_lengths:
-                        avg_length = sum(row_lengths) / len(row_lengths)
-                        consistency = 1 - (abs(avg_length - header_cols) / max(header_cols, avg_length))
-                        score += 0.3 * consistency
+        # Basic structure check - more permissive
+        if table.headers and len(table.headers[0]) >= 1:  # At least 1 column
+            score += 0.4
         
-        # Check minimum row count
-        if len(table.rows) >= self.MIN_TABLE_ROWS:
-            score += 0.2
+        # Row count check - more permissive
+        if len(table.rows) >= 1:  # At least 1 row
+            score += 0.3
         
-        # Check for empty cells distribution (tables can have some empty cells)
-        if table.rows:
-            total_cells = sum(len(row) for row in table.rows)
-            empty_cells = sum(1 for row in table.rows for cell in row if not str(cell).strip())
-            empty_ratio = empty_cells / total_cells if total_cells > 0 else 0
-            
-            # Ideal empty ratio is 10-30% for real tables
-            if 0.1 <= empty_ratio <= 0.3:
-                score += 0.2
-            elif empty_ratio < 0.1:
-                score += 0.1  # Few empty cells is still okay
+        # Content check - ensure there's actual content
+        total_cells = sum(len(row) for row in table.rows) if table.rows else 0
+        if total_cells > 0:
+            score += 0.3
         
         return min(1.0, score)
     
     def _analyze_content_semantics(self, table: Table) -> float:
-        """Analyze content to distinguish tables from prose text"""
+        """Analyze content to distinguish tables from prose text - simplified"""
         if not table.rows:
             return 0.0
         
@@ -574,26 +645,25 @@ class TableExtractor:
         
         score = 0.0
         
-        # 1. Sentence completion analysis
-        sentence_score = self._analyze_sentence_patterns(combined_text)
-        score += 0.3 * (1 - sentence_score)  # Lower sentence score = more table-like
+        # Simple content analysis - more permissive
+        # 1. Check if content looks fragmented (table-like)
+        words = combined_text.split()
+        if len(words) > 0:
+            avg_word_length = sum(len(word) for word in words) / len(words)
+            # Short average word length suggests table data
+            if avg_word_length < 8:
+                score += 0.4
+            else:
+                score += 0.2
         
-        # 2. Data type diversity
-        data_diversity_score = self._analyze_data_diversity(all_text)
-        score += 0.3 * data_diversity_score
+        # 2. Check for numeric content (common in tables)
+        numeric_count = sum(1 for word in words if re.match(r'^\d+(\.\d+)?$', word))
+        if numeric_count > 0:
+            score += 0.3
         
-        # 3. Reading ease (prose text has higher readability)
-        try:
-            reading_ease = flesch_reading_ease(combined_text)
-            # Lower reading ease suggests more fragmented, table-like content
-            ease_score = max(0, (100 - reading_ease) / 100)
-            score += 0.2 * ease_score
-        except:
-            score += 0.1  # Default score if analysis fails
-        
-        # 4. Token length distribution
-        token_score = self._analyze_token_patterns(all_text)
-        score += 0.2 * token_score
+        # 3. Basic structure check
+        if len(table.headers) > 0 and len(table.rows) > 0:
+            score += 0.3
         
         return min(1.0, score)
     
@@ -691,83 +761,25 @@ class TableExtractor:
         return (length_score + variance_score) / 2
     
     def _validate_table_size(self, table: Table) -> float:
-        """Validate table size and proportions"""
+        """Validate table size and proportions - simplified and more permissive"""
         if not table.bbox:
-            return 0.5  # Default score if no bbox
-        
-        # Calculate area
-        width = table.bbox.x2 - table.bbox.x1
-        height = table.bbox.y2 - table.bbox.y1
-        area = width * height
+            return 0.7  # Default score if no bbox - more permissive
         
         score = 0.0
         
-        # Size thresholds (in points, assuming typical PDF dimensions)
-        min_area = 5000  # Minimum reasonable table area
-        max_area = 400000  # Maximum reasonable table area
-        
-        if min_area <= area <= max_area:
+        # Basic size check - very permissive
+        if table.rows and len(table.rows) > 0:
             score += 0.5
         
-        # Aspect ratio validation
-        aspect_ratio = width / height if height > 0 else 0
-        # Tables typically have aspect ratios between 0.5 and 3.0
-        if 0.5 <= aspect_ratio <= 3.0:
-            score += 0.3
-        
-        # Row/column ratio validation
-        if table.rows and table.headers:
-            num_rows = len(table.rows)
-            num_cols = len(table.headers[0]) if table.headers[0] else 1
-            
-            # Reasonable table dimensions
-            if 2 <= num_rows <= 50 and 2 <= num_cols <= 15:
-                score += 0.2
+        if table.headers and len(table.headers) > 0:
+            score += 0.5
         
         return min(1.0, score)
     
     async def _analyze_context_coherence(self, table: Table, pdf_path: Path) -> float:
-        """Analyze surrounding text context for table coherence"""
-        try:
-            doc = fitz.open(str(pdf_path))
-            page = doc[table.page - 1]  # 0-indexed
-            
-            # Get text blocks around the table
-            text_dict = page.get_text("dict")
-            
-            # Find text near the table bbox
-            nearby_text = []
-            for block in text_dict["blocks"]:
-                if block.get("type") == 0:  # Text block
-                    block_bbox = block["bbox"]
-                    if self._is_near_table(block_bbox, table.bbox):
-                        for line in block["lines"]:
-                            for span in line["spans"]:
-                                nearby_text.append(span["text"])
-            
-            doc.close()
-            
-            if not nearby_text:
-                return 0.5  # No context found
-            
-            context_text = ' '.join(nearby_text)
-            
-            # Look for table-related keywords
-            table_keywords = [
-                'table', 'figure', 'data', 'results', 'comparison',
-                'shows', 'presents', 'listed', 'summarized', 'below'
-            ]
-            
-            keyword_score = 0
-            for keyword in table_keywords:
-                if keyword.lower() in context_text.lower():
-                    keyword_score += 0.1
-            
-            return min(1.0, keyword_score)
-            
-        except Exception as e:
-            logger.warning(f"Context analysis failed: {e}")
-            return 0.5
+        """Analyze surrounding text context for table coherence - simplified"""
+        # Simplified context analysis - return default score to be more permissive
+        return 0.6  # Default moderate score to avoid being too restrictive
     
     def _is_near_table(self, text_bbox: List[float], table_bbox: BoundingBox, 
                       proximity_threshold: float = 100) -> bool:
@@ -785,42 +797,21 @@ class TableExtractor:
         return distance <= proximity_threshold
     
     def _detect_data_patterns(self, table: Table) -> float:
-        """Detect patterns that indicate genuine tabular data"""
+        """Detect patterns that indicate genuine tabular data - simplified"""
         if not table.rows:
             return 0.0
         
         score = 0.0
         
-        # 1. Column data type consistency
-        if table.headers:
-            num_cols = len(table.headers[0])
-            
-            for col_idx in range(num_cols):
-                col_data = []
-                for row in table.rows:
-                    if col_idx < len(row):
-                        col_data.append(str(row[col_idx]).strip())
-                
-                if col_data:
-                    consistency_score = self._calculate_column_consistency(col_data)
-                    score += consistency_score / num_cols
+        # Simple pattern detection - more permissive
+        # 1. Basic structure check
+        if table.headers and table.rows:
+            score += 0.5
         
-        # 2. Numerical data presence
-        numeric_cells = 0
-        total_cells = 0
-        
-        for row in table.rows:
-            for cell in row:
-                cell_str = str(cell).strip()
-                if cell_str:
-                    total_cells += 1
-                    if re.match(r'^\d+(\.\d+)?$', cell_str) or \
-                       re.match(r'^\d+(\.\d+)?%$', cell_str):
-                        numeric_cells += 1
-        
+        # 2. Content check
+        total_cells = sum(len(row) for row in table.rows)
         if total_cells > 0:
-            numeric_ratio = numeric_cells / total_cells
-            score += 0.3 * min(1.0, numeric_ratio * 2)  # Boost numeric content
+            score += 0.5
         
         return min(1.0, score)
     
@@ -870,27 +861,32 @@ class TableExtractor:
 
     # Enhanced helper methods
     def _clean_and_validate_table_data(self, table_data: List[List]) -> Optional[Tuple[List[List], List[List]]]:
-        """Enhanced cleaning and validation of raw table data"""
-        if not table_data or len(table_data) < 2:
+        """Enhanced cleaning and validation of raw table data - more permissive"""
+        if not table_data:
             return None
         
-        # Remove completely empty rows
+        # More permissive: allow tables with just 1 row (minimum viable table)
+        if len(table_data) < 1:
+            return None
+        
+        # Remove completely empty rows but be more permissive
         filtered_data = []
         for row in table_data:
+            # Check if row has any non-empty content
             if any(cell and str(cell).strip() for cell in row):
                 filtered_data.append(row)
         
-        if len(filtered_data) < 2:
+        if len(filtered_data) < 1:
             return None
         
         # Detect header row (usually first non-empty row)
         headers = [filtered_data[0]]
-        rows = filtered_data[1:]
+        rows = filtered_data[1:] if len(filtered_data) > 1 else []
         
         # Normalize column count
-        max_cols = max(len(row) for row in filtered_data)
+        max_cols = max(len(row) for row in filtered_data) if filtered_data else 1
         
-        # Clean and normalize headers
+        # Clean and normalize headers - be more permissive
         normalized_headers = []
         for i, cell in enumerate(headers[0]):
             if i >= max_cols:
@@ -931,16 +927,31 @@ class TableExtractor:
             confidence=0.6  # Lower confidence for estimated bbox
         )
     
-    def _create_table_object(self, headers: List[List], rows: List[List], 
+    async def _create_table_object(self, headers: List[List], rows: List[List], 
                            page: int, idx: int, bbox: BoundingBox, 
                            method: str) -> Table:
         """Create table object with enhanced metadata"""
         # Save as CSV
         csv_path = self.output_dir / f"{method}_page{page}_table{idx}.csv"
+        cloudinary_csv_url = None
+        
         try:
             df = pd.DataFrame(rows, columns=headers[0] if headers else None)
             df.to_csv(csv_path, index=False)
             html = df.to_html(index=False, classes='table table-bordered')
+            
+            # Upload CSV to Cloudinary
+            if csv_path.exists():
+                try:
+                    cloudinary_csv_url = await cloudinary_service.upload_file(
+                        str(csv_path), 
+                        folder="tables/csv",
+                        public_id=f"{method}_page{page}_table{idx}_data"
+                    )
+                    logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                except Exception as e:
+                    logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
+                    
         except Exception as e:
             logger.warning(f"Failed to save table as CSV: {e}")
             csv_path = None
@@ -952,7 +963,7 @@ class TableExtractor:
             bbox=bbox,
             headers=headers,
             rows=rows,
-            csv_path=str(csv_path) if csv_path else None,
+            csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
             html=html,
             extraction_method=method
         )

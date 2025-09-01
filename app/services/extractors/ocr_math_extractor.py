@@ -460,46 +460,158 @@ class OCRMathExtractor:
         return None
     
     async def _extract_math_formulas(self, pdf_path: Path) -> List[Equation]:
-        """Extract mathematical formulas from PDF text"""
+        """Extract mathematical formulas from PDF text and images"""
         equations = []
         doc = fitz.open(str(pdf_path))
         
         for page_num, page in enumerate(doc, 1):
             text = page.get_text()
             
-            # Look for LaTeX-style math
+            # Enhanced LaTeX-style math detection
             # Display equations
-            display_matches = re.finditer(r'\\begin{equation}(.*?)\\end{equation}', text, re.DOTALL)
-            for match in display_matches:
-                equations.append(Equation(
-                    latex=match.group(1).strip(),
-                    page=page_num,
-                    inline=False
-                ))
+            display_patterns = [
+                r'\\begin{equation}(.*?)\\end{equation}',
+                r'\\begin{align}(.*?)\\end{align}',
+                r'\\begin{gather}(.*?)\\end{gather}',
+                r'\\begin{multline}(.*?)\\end{multline}',
+                r'\$\$(.*?)\$\$',
+                r'\\\[(.*?)\\\]'
+            ]
             
-            # Inline math with \( \)
-            inline_matches = re.finditer(r'\\\((.*?)\\\)', text)
-            for match in inline_matches:
-                equations.append(Equation(
-                    latex=match.group(1).strip(),
-                    page=page_num,
-                    inline=True
-                ))
+            for pattern in display_patterns:
+                matches = re.finditer(pattern, text, re.DOTALL)
+                for match in matches:
+                    latex = match.group(1).strip()
+                    if self._is_likely_equation(latex):
+                        equations.append(Equation(
+                            latex=latex,
+                            page=page_num,
+                            inline=False
+                        ))
             
-            # Alternative patterns
-            # Numbered equations
-            numbered_matches = re.finditer(r'(?:^|\n)\s*([A-Za-z0-9\s\+\-\*\/\=\(\)]+)\s*\(\d+\)\s*(?:\n|$)', text)
-            for match in numbered_matches:
-                formula = match.group(1).strip()
-                if self._is_likely_equation(formula):
-                    equations.append(Equation(
-                        latex=formula,
-                        page=page_num,
-                        inline=False
-                    ))
+            # Inline math patterns
+            inline_patterns = [
+                r'\\\((.*?)\\\)',
+                r'\$(.*?)\$',
+                r'\\math{(.*?)}',
+                r'\\text{(.*?)}'
+            ]
+            
+            for pattern in inline_patterns:
+                matches = re.finditer(pattern, text)
+                for match in matches:
+                    latex = match.group(1).strip()
+                    if self._is_likely_equation(latex):
+                        equations.append(Equation(
+                            latex=latex,
+                            page=page_num,
+                            inline=True
+                        ))
+            
+            # Numbered equations and standalone formulas
+            numbered_patterns = [
+                r'(?:^|\n)\s*([A-Za-z0-9\s\+\-\*\/\=\(\)\[\]\{\}\^_]+)\s*\(\d+\)\s*(?:\n|$)',
+                r'(?:^|\n)\s*([A-Za-z0-9\s\+\-\*\/\=\(\)\[\]\{\}\^_]+)\s*=\s*[A-Za-z0-9\s\+\-\*\/\=\(\)\[\]\{\}\^_]+(?:\n|$)',
+                r'(?:^|\n)\s*([A-Za-z0-9\s\+\-\*\/\=\(\)\[\]\{\}\^_]+)\s*≈\s*[A-Za-z0-9\s\+\-\*\/\=\(\)\[\]\{\}\^_]+(?:\n|$)'
+            ]
+            
+            for pattern in numbered_patterns:
+                matches = re.finditer(pattern, text)
+                for match in matches:
+                    formula = match.group(1).strip()
+                    if self._is_likely_equation(formula):
+                        equations.append(Equation(
+                            latex=formula,
+                            page=page_num,
+                            inline=False
+                        ))
+            
+            # Extract equations from images using OCR
+            image_equations = await self._extract_equations_from_images(page, page_num)
+            equations.extend(image_equations)
         
         doc.close()
         return equations
+    
+    async def _extract_equations_from_images(self, page, page_num: int) -> List[Equation]:
+        """Extract equations from page images using OCR"""
+        equations = []
+        
+        try:
+            # Get page image
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_data = pix.tobytes("png")
+            
+            # Convert to numpy array
+            nparr = np.frombuffer(img_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Detect potential equation regions
+            equation_regions = self._detect_equation_regions(gray)
+            
+            for region in equation_regions:
+                x, y, w, h = region
+                roi = gray[y:y+h, x:x+w]
+                
+                # Use OCR to extract equation text
+                ocr_result = self._ocr_math_region(img, region, page_num)
+                if ocr_result and self._is_likely_equation(ocr_result['text']):
+                    equations.append(Equation(
+                        latex=ocr_result['text'],
+                        page=page_num,
+                        inline=False,
+                        bbox=ocr_result['bbox']
+                    ))
+        
+        except Exception as e:
+            logger.warning(f"Failed to extract equations from images on page {page_num}: {e}")
+        
+        return equations
+    
+    def _detect_equation_regions(self, gray: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Detect regions that likely contain equations"""
+        regions = []
+        height, width = gray.shape
+        
+        # Method 1: Look for isolated text blocks
+        # Use morphological operations to find text regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilated = cv2.dilate(gray, kernel, iterations=1)
+        eroded = cv2.erode(dilated, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(eroded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Filter by size and aspect ratio
+            if (w > 50 and h > 20 and w < width * 0.8 and h < height * 0.3 and
+                w/h < 10 and h/w < 5):
+                
+                # Check if region contains math symbols
+                roi = gray[y:y+h, x:x+w]
+                if self._contains_math_symbols(roi):
+                    regions.append((x, y, w, h))
+        
+        return regions
+    
+    def _contains_math_symbols(self, roi: np.ndarray) -> bool:
+        """Check if image region contains mathematical symbols"""
+        try:
+            # Use OCR with math-specific configuration
+            text = pytesseract.image_to_string(
+                roi,
+                config='--psm 8 -c tessedit_char_whitelist=0123456789+-=*/^()[]{}ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz∫∑∏√±×÷≈≠≤≥∞αβγδεζηθικλμνξπρστυφχψω'
+            )
+            
+            # Check for math operators and symbols
+            math_symbols = set('+-=*/^()[]{}∫∑∏√±×÷≈≠≤≥∞αβγδεζηθικλμνξπρστυφχψω')
+            return any(symbol in text for symbol in math_symbols)
+        
+        except:
+            return False
     
     def _is_likely_equation(self, text: str) -> bool:
         """Check if text is likely a mathematical equation"""

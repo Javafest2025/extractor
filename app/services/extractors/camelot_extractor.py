@@ -118,6 +118,33 @@ class CamelotExtractor:
                     except Exception as e:
                         logger.warning(f"Failed to process table image: {e}")
                     
+                    # Create CSV file and upload to Cloudinary
+                    csv_path = None
+                    cloudinary_csv_url = None
+                    try:
+                        import pandas as pd
+                        from pathlib import Path
+                        
+                        # Create output directory if it doesn't exist
+                        output_dir = Path("paper/tables")
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Save as CSV
+                        csv_path = output_dir / f"camelot_page{table.page}_table{idx}.csv"
+                        df = pd.DataFrame(rows, columns=headers if headers else None)
+                        df.to_csv(csv_path, index=False)
+                        
+                        # Upload CSV to Cloudinary
+                        cloudinary_csv_url = await cloudinary_service.upload_file(
+                            str(csv_path), 
+                            folder="tables/csv",
+                            public_id=f"camelot_page{table.page}_table{idx}_data"
+                        )
+                        logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to create/upload CSV for Camelot table: {e}")
+                    
                     # Create table object
                     table_obj = Table(
                         label=f"Table {table.page}.{idx}",
@@ -125,6 +152,7 @@ class CamelotExtractor:
                         bbox=bbox_obj,
                         headers=[headers] if headers else [],
                         rows=rows,
+                        csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
                         extraction_method="camelot",
                         image_path=image_path,
                         confidence=table.accuracy / 100.0 if table.accuracy else 0.5

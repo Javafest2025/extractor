@@ -195,9 +195,81 @@ class CodeExtractor:
         return code_blocks
     
     def _is_code_block(self, text: str) -> bool:
-        """Check if text is likely a code block"""
-        if len(text) < 10:
+        """Check if text is likely a code block with enhanced validation"""
+        if len(text) < 20:  # Increased minimum length
             return False
+        
+        # Check for code indicators
+        code_indicators = 0
+        total_checks = 0
+        
+        # 1. Check for programming keywords
+        programming_keywords = [
+            'def', 'function', 'class', 'if', 'else', 'for', 'while', 'return',
+            'import', 'from', 'include', 'using', 'public', 'private', 'void',
+            'int', 'float', 'string', 'bool', 'true', 'false', 'null', 'var',
+            'const', 'let', 'try', 'catch', 'finally', 'throw', 'new', 'this',
+            'super', 'extends', 'implements', 'interface', 'enum', 'switch',
+            'case', 'break', 'continue', 'do', 'while', 'for', 'in', 'of'
+        ]
+        
+        text_lower = text.lower()
+        for keyword in programming_keywords:
+            if keyword in text_lower:
+                code_indicators += 1
+                break  # Only count once per keyword type
+        
+        total_checks += 1
+        
+        # 2. Check for code patterns
+        for pattern_type, patterns in self.CODE_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    code_indicators += 1
+                    break  # Only count once per pattern type
+            total_checks += 1
+        
+        # 3. Check for indentation patterns (common in code)
+        lines = text.split('\n')
+        indented_lines = sum(1 for line in lines if line.startswith('    ') or line.startswith('\t'))
+        if indented_lines > len(lines) * 0.3:  # More than 30% lines are indented
+            code_indicators += 1
+        total_checks += 1
+        
+        # 4. Check for balanced brackets/parentheses
+        open_brackets = text.count('(') + text.count('[') + text.count('{')
+        close_brackets = text.count(')') + text.count(']') + text.count('}')
+        if abs(open_brackets - close_brackets) <= 2:  # Roughly balanced
+            code_indicators += 1
+        total_checks += 1
+        
+        # 5. Check for semicolons and assignment operators
+        if text.count(';') > len(lines) * 0.5 or text.count('=') > len(lines) * 0.3:
+            code_indicators += 1
+        total_checks += 1
+        
+        # 6. Check for comments
+        comment_patterns = [r'//', r'/\*', r'#', r'%', r'<!--']
+        for pattern in comment_patterns:
+            if re.search(pattern, text):
+                code_indicators += 1
+                break
+        total_checks += 1
+        
+        # 7. Check for function calls (parentheses with text)
+        function_calls = re.findall(r'\w+\s*\([^)]*\)', text)
+        if len(function_calls) > len(lines) * 0.2:
+            code_indicators += 1
+        total_checks += 1
+        
+        # 8. Check for variable assignments
+        assignments = re.findall(r'\w+\s*=\s*[^;]+', text)
+        if len(assignments) > len(lines) * 0.2:
+            code_indicators += 1
+        total_checks += 1
+        
+        # Require at least 60% of checks to pass for code classification
+        return (code_indicators / total_checks) >= 0.6
         
         # Count code indicators
         score = 0
