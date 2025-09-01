@@ -29,6 +29,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch==2.2.0+cpu torchvision==0.17.0+cpu -f https://download.pytorch.org/whl/torch_stable.html && \
     pip install --no-cache-dir -r requirements.txt
 
+# Set PyTorch to use only 1 thread to prevent CPU overload
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+
 # Stage 2: Runtime image
 FROM python:3.11-slim
 
@@ -75,6 +81,19 @@ ENV HF_HOME="/app/cache/huggingface"
 ENV TORCH_HOME="/app/cache/torch"
 ENV EASYOCR_MODULE_PATH="/app/cache/easyocr"
 
+# CPU optimization: Limit threads to prevent overload
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV VECLIB_MAXIMUM_THREADS=1
+ENV BLAS_NUM_THREADS=1
+ENV LAPACK_NUM_THREADS=1
+
+# PyTorch CPU optimization
+ENV TORCH_NUM_THREADS=1
+ENV TORCH_NUM_INTEROP_THREADS=1
+
 # Set working directory
 WORKDIR /app
 
@@ -96,5 +115,5 @@ EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8002/health || exit 1
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+# Run the application with CPU optimization
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1", "--limit-concurrency", "10", "--limit-max-requests", "1000"]

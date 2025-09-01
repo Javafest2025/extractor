@@ -15,9 +15,20 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RABBITMQ_HOST=user-rabbitmq
       - RABBITMQ_PORT=5672
+      - GROBID_URL=http://pdf_extractor_grobid:8070
+      - REDIS_URL=redis://user-redis:6379/0
       - HF_HOME=/app/cache/huggingface
       - TORCH_HOME=/app/cache/torch
       - EASYOCR_MODULE_PATH=/app/cache/easyocr
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - VECLIB_MAXIMUM_THREADS=1
+      - BLAS_NUM_THREADS=1
+      - LAPACK_NUM_THREADS=1
+      - TORCH_NUM_THREADS=1
+      - TORCH_NUM_INTEROP_THREADS=1
     volumes:
       - ./paper:/app/paper
       - ./logs:/app/logs
@@ -26,34 +37,27 @@ services:
     networks:
       - scholarai-network
     restart: unless-stopped
+
+    # —— Resource controls (Compose) ——
+    # Use ONE style only. Here we use NanoCPUs (cpus) + memory limits.
+    cpus: 2.0                 # caps to ~2 cores
+    cpu_shares: 1024          # relative weight vs other containers
+    mem_limit: 4g             # hard memory cap
+    mem_reservation: 1g       # soft reservation
+
+    # ulimits are fine
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-    depends_on:
-      - user-rabbitmq
 
-  user-rabbitmq:
-    image: rabbitmq:3-management
-    container_name: user-rabbitmq
-    environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - scholarai-network
-    restart: unless-stopped
-
-volumes:
-  rabbitmq_data:
-
-# Connect to existing network from main orchestration
 networks:
   scholarai-network:
     external: true
