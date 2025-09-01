@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
-    """Application configuration settings"""
+    """Application configuration settings (Memory Optimized)"""
     
     # Application
     app_name: str = "PDFExtractor"
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # External Services
     grobid_url: str = "http://localhost:8070"
     pdffigures2_path: str = ""  # Disabled - using fallback methods (PyMuPDF + CV)
-    nougat_model_path: str = "facebook/nougat-base"
+    nougat_model_path: str = ""  # DISABLED: Heavy AI model removed for memory optimization
     
     # Enrichment APIs
     crossref_api_url: str = "https://api.crossref.org"
@@ -33,20 +33,26 @@ class Settings(BaseSettings):
     # Storage
     paper_folder: Path = Path("./paper")
     output_format: str = "json"
-    keep_intermediate_files: bool = True
+    keep_intermediate_files: bool = False  # Changed to False to save memory
     
-    # Processing
-    max_workers: int = 4
-    extraction_timeout: int = 300
+    # Processing (Memory Optimized)
+    max_workers: int = 2  # Reduced from 4
+    extraction_timeout: int = 180  # Reduced from 300
     ocr_language: str = "eng"
-    use_gpu: bool = True
+    use_gpu: bool = False  # Changed to False to avoid GPU memory issues
     
-    # OCR Configuration (free local options only)
-    ocr_provider: str = "auto"  # auto, easyocr, paddleocr
+    # OCR Configuration (Lightweight only)
+    ocr_provider: str = "tesseract"  # Only Tesseract, no EasyOCR
+    
+    # Memory Optimization Settings
+    enable_heavy_models: bool = False  # Disable AI models
+    enable_table_transformer: bool = False  # Disable deep learning table extraction
+    enable_nougat_ocr: bool = False  # Disable Nougat OCR
+    enable_easyocr: bool = False  # Disable EasyOCR
     
     # Cache
     redis_url: Optional[str] = None
-    cache_ttl: int = 3600
+    cache_ttl: int = 1800  # Reduced from 3600
     
     # RabbitMQ
     rabbitmq_user: Optional[str] = None
