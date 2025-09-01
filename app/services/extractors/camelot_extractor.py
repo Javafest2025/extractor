@@ -60,13 +60,88 @@ class CamelotExtractor:
                     # Get table data
                     df = table.df
                     
-                    # Skip empty tables
+                    # Enhanced validation: Skip empty or malformed tables
                     if df.empty or df.shape[0] <= 1:
+                        logger.debug(f"Skipping empty Camelot table {idx} on page {table.page}")
                         continue
                     
-                    # Convert DataFrame to list format
+                    # Check for tables with only empty/whitespace content
+                    has_content = False
+                    for col in df.columns:
+                        if df[col].astype(str).str.strip().str.len().sum() > 0:
+                            has_content = True
+                            break
+                    
+                    if not has_content:
+                        logger.debug(f"Skipping contentless Camelot table {idx} on page {table.page}")
+                        continue
+                    
+                    # Convert DataFrame to list format with content validation
                     headers = df.iloc[0].tolist() if not df.empty else []
                     rows = df.iloc[1:].values.tolist() if df.shape[0] > 1 else []
+                    
+                    # Additional validation: Check if headers and rows have meaningful content
+                    if headers:
+                        # Filter out empty/whitespace headers
+                        headers = [str(h).strip() for h in headers if str(h).strip()]
+                        if not headers:
+                            logger.debug(f"Skipping Camelot table {idx} on page {table.page} - no valid headers")
+                            continue
+                    
+                    if rows:
+                        # Filter out completely empty rows
+                        valid_rows = []
+                        for row in rows:
+                            row_content = [str(cell).strip() for cell in row]
+                            if any(cell for cell in row_content):  # At least one non-empty cell
+                                valid_rows.append(row)
+                        rows = valid_rows
+                        
+                        if not rows:
+                            logger.debug(f"Skipping Camelot table {idx} on page {table.page} - no valid rows")
+                            continue
+                    
+                    # Final validation: Must have both headers and rows with content
+                    if not headers or not rows:
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - insufficient content")
+                        continue
+                    
+                    # Content quality validation: Ensure minimum meaningful content
+                    total_cells = len(headers) * (len(rows) + 1)  # headers + rows
+                    non_empty_cells = 0
+                    
+                    # Count non-empty cells in headers
+                    for header in headers:
+                        if str(header).strip():
+                            non_empty_cells += 1
+                    
+                    # Count non-empty cells in rows
+                    for row in rows:
+                        for cell in row:
+                            if str(cell).strip():
+                                non_empty_cells += 1
+                    
+                    # Calculate content density (must be at least 30% non-empty cells)
+                    content_density = non_empty_cells / total_cells if total_cells > 0 else 0
+                    if content_density < 0.3:
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - low content density: {content_density:.2f}")
+                        continue
+                    
+                    # Minimum content threshold: Must have at least 3 meaningful cells
+                    if non_empty_cells < 3:
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - insufficient meaningful content: {non_empty_cells} cells")
+                        continue
+                    
+                    # Table size validation: Must have reasonable dimensions
+                    if len(headers) < 2 or len(rows) < 1:
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - too small: {len(headers)} cols x {len(rows)} rows")
+                        continue
+                    
+                    if len(headers) > 20 or len(rows) > 100:
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - too large: {len(headers)} cols x {len(rows)} rows")
+                        continue
+                    
+                    logger.debug(f"Camelot table {idx} on page {table.page} passed validation: {non_empty_cells}/{total_cells} cells ({content_density:.2f} density)")
                     
                     # Get table bounding box
                     bbox = table._bbox
@@ -118,44 +193,23 @@ class CamelotExtractor:
                     except Exception as e:
                         logger.warning(f"Failed to process table image: {e}")
                     
-                    # Create CSV file and upload to Cloudinary
-                    csv_path = None
-                    cloudinary_csv_url = None
-                    try:
-                        import pandas as pd
-                        from pathlib import Path
-                        
-                        # Create output directory if it doesn't exist
-                        output_dir = Path("paper/tables")
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        
-                        # Save as CSV
-                        csv_path = output_dir / f"camelot_page{table.page}_table{idx}.csv"
-                        df = pd.DataFrame(rows, columns=headers if headers else None)
-                        df.to_csv(csv_path, index=False)
-                        
-                        # Upload CSV to Cloudinary
-                        cloudinary_csv_url = await cloudinary_service.upload_file(
-                            str(csv_path), 
-                            folder="tables/csv",
-                            public_id=f"camelot_page{table.page}_table{idx}_data"
-                        )
-                        logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to create/upload CSV for Camelot table: {e}")
+                    # Accuracy threshold validation: Skip low-accuracy extractions
+                    accuracy_score = table.accuracy / 100.0 if table.accuracy else 0.5
+                    if accuracy_score < 0.4:  # Must have at least 40% accuracy
+                        logger.debug(f"Skipping Camelot table {idx} on page {table.page} - low accuracy: {accuracy_score:.2f}")
+                        continue
                     
-                    # Create table object
+                    # Create table object WITHOUT files or Cloudinary uploads
                     table_obj = Table(
                         label=f"Table {table.page}.{idx}",
                         page=table.page,
                         bbox=bbox_obj,
                         headers=[headers] if headers else [],
                         rows=rows,
-                        csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
+                        csv_path=None,  # No file path yet
                         extraction_method="camelot",
-                        image_path=image_path,
-                        confidence=table.accuracy / 100.0 if table.accuracy else 0.5
+                        image_path=None,  # No image path yet
+                        confidence=accuracy_score
                     )
                     
                     extracted_tables.append(table_obj)

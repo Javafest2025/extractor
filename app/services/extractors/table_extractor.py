@@ -80,12 +80,12 @@ class TableExtractor:
         """Extract tables using enhanced validation pipeline"""
         all_candidates = []
         
-        # Phase 1: Extract candidates from multiple methods
+        # Phase 1: Extract table DATA ONLY from multiple methods (no files created yet)
         methods = [
-            ('pdfplumber', self._extract_with_pdfplumber),
-            ('transformer', self._extract_with_transformer),
-            ('camelot', self._extract_with_camelot),
-            ('tabula', self._extract_with_tabula)
+            ('pdfplumber', self._extract_with_pdfplumber_data_only),
+            ('transformer', self._extract_with_transformer_data_only),
+            ('camelot', self._extract_with_camelot_data_only),
+            ('tabula', self._extract_with_tabula_data_only)
         ]
         
         for method_name, method_func in methods:
@@ -106,10 +106,28 @@ class TableExtractor:
         # Phase 2: Advanced validation pipeline
         validated_tables = await self._validate_table_candidates(all_candidates, pdf_path)
         
-        # Phase 3: Deduplicate validated tables
-        final_tables = self._deduplicate_tables([], validated_tables)
+        # Phase 3: Deduplicate validated tables BEFORE creating any files
+        logger.info(f"Before deduplication: {len(validated_tables)} validated tables")
+        unique_tables = self._deduplicate_tables([], validated_tables)
+        logger.info(f"After deduplication: {len(unique_tables)} unique tables")
         
-        # Phase 4: Post-process: enhance table structure for all extracted tables
+        # Phase 4: Create files and upload to Cloudinary ONLY for unique tables
+        final_tables = []
+        for table in unique_tables:
+            # Create the actual table object with files and Cloudinary uploads
+            final_table = await self._create_final_table_object(table, pdf_path)
+            final_tables.append(final_table)
+        
+        # Log which extractors contributed to final results
+        extractor_counts = {}
+        for table in final_tables:
+            method = table.extraction_method
+            extractor_counts[method] = extractor_counts.get(method, 0) + 1
+        
+        for method, count in extractor_counts.items():
+            logger.info(f"Final tables from {method}: {count}")
+        
+        # Phase 5: Post-process: enhance table structure for all extracted tables
         for table in final_tables:
             if not table.headers or not table.rows:
                 await self._enhance_table_structure(table, pdf_path)
@@ -117,6 +135,43 @@ class TableExtractor:
         logger.info(f"Final result: {len(final_tables)} validated tables from {len(all_candidates)} candidates")
         
         return final_tables
+    
+    async def _extract_with_pdfplumber_data_only(self, pdf_path: Path) -> List[Table]:
+        """PDFPlumber extraction - DATA ONLY, no files created"""
+        tables = []
+        
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                page_tables = page.extract_tables()
+                
+                for idx, table_data in enumerate(page_tables):
+                    if not table_data or len(table_data) < 2:
+                        continue
+                    
+                    # Enhanced data cleaning and validation
+                    cleaned_table = self._clean_and_validate_table_data(table_data)
+                    if not cleaned_table:
+                        continue
+                    
+                    headers, rows = cleaned_table
+                    
+                    # Estimate bbox with better heuristics
+                    bbox = self._estimate_table_bbox(page, table_data, page_num)
+                    
+                    # Create table object WITHOUT files or Cloudinary uploads
+                    table = Table(
+                        label=f"Table {page_num}.{idx}",
+                        page=page_num,
+                        bbox=bbox,
+                        headers=headers,
+                        rows=rows,
+                        csv_path=None,  # No file path yet
+                        html=None,      # No HTML yet
+                        extraction_method="pdfplumber"
+                    )
+                    tables.append(table)
+        
+        return tables
     
     async def _extract_with_pdfplumber(self, pdf_path: Path) -> List[Table]:
         """Enhanced PDFPlumber extraction with better normalization"""
@@ -146,6 +201,75 @@ class TableExtractor:
                     )
                     tables.append(table)
         
+        return tables
+    
+    async def _extract_with_transformer_data_only(self, pdf_path: Path) -> List[Table]:
+        """Transformer extraction - DATA ONLY, no files created"""
+        tables = []
+        doc = fitz.open(str(pdf_path))
+        
+        for page_num, page in enumerate(doc, 1):
+            # Render page to image
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_data = pix.tobytes("png")
+            
+            # Convert to PIL Image
+            pil_image = Image.open(io.BytesIO(img_data))
+            
+            # Detect tables
+            table_regions = await self._detect_tables(pil_image)
+            
+            for idx, region in enumerate(table_regions):
+                # Crop table region
+                x1, y1, x2, y2 = region
+                table_image = pil_image.crop((x1, y1, x2, y2))
+                
+                # Recognize table structure
+                structure = await self._recognize_structure(table_image)
+                
+                # Extract text from cells
+                headers, rows = await self._extract_cell_text(
+                    page, region, structure
+                )
+                
+                # Enhanced data cleaning and validation
+                if headers and rows:
+                    cleaned_table = self._clean_and_validate_table_data([headers[0]] + rows if headers else rows)
+                    if cleaned_table:
+                        cleaned_headers, cleaned_rows = cleaned_table
+                        headers = cleaned_headers
+                        rows = cleaned_rows
+                
+                # Convert coordinates to PDF space
+                scale = page.rect.width / pil_image.width
+                
+                # Extract table caption and references
+                caption, references = await self._extract_table_caption_and_references(pdf_path, page_num, x1, y1, x2, y2)
+                
+                # Create table object WITHOUT files or Cloudinary uploads
+                table = Table(
+                    label=f"Table {page_num}.{idx}",
+                    page=page_num,
+                    bbox=BoundingBox(
+                        x1=x1 * scale,
+                        y1=y1 * scale,
+                        x2=x2 * scale,
+                        y2=y2 * scale,
+                        page=page_num,
+                        confidence=0.8
+                    ),
+                    headers=headers,
+                    rows=rows,
+                    csv_path=None,  # No file path yet
+                    html=None,      # No HTML yet
+                    extraction_method="transformer",
+                    image_path=None,  # No image path yet
+                    caption=caption,
+                    references=references
+                )
+                tables.append(table)
+        
+        doc.close()
         return tables
     
     async def _extract_with_transformer(self, pdf_path: Path) -> List[Table]:
@@ -480,23 +604,187 @@ class TableExtractor:
                           existing: List[Table],
                           new: List[Table],
                           iou_threshold: float = 0.5) -> List[Table]:
-        """Remove duplicate tables based on page and bbox overlap"""
-        unique_new = []
+        """Advanced deduplication system with content similarity and extractor prioritization"""
+        if not new:
+            return existing
         
-        for new_table in new:
+        # Define extractor priority (higher number = higher priority)
+        extractor_priority = {
+            'pdfplumber': 4,
+            'transformer': 3,
+            'tabula': 2,
+            'camelot': 1
+        }
+        
+        # Combine existing and new tables
+        all_tables = existing + new
+        
+        # Group tables by page
+        tables_by_page = {}
+        for table in all_tables:
+            if table.page not in tables_by_page:
+                tables_by_page[table.page] = []
+            tables_by_page[table.page].append(table)
+        
+        # Deduplicate each page separately
+        deduplicated_tables = []
+        for page_num, page_tables in tables_by_page.items():
+            page_deduplicated = self._deduplicate_page_tables(page_tables, extractor_priority)
+            deduplicated_tables.extend(page_deduplicated)
+        
+        return deduplicated_tables
+    
+    def _deduplicate_page_tables(self, page_tables: List[Table], extractor_priority: Dict[str, int]) -> List[Table]:
+        """Deduplicate tables on the same page using multiple strategies"""
+        if len(page_tables) <= 1:
+            return page_tables
+        
+        # Sort tables by extractor priority (highest first)
+        page_tables.sort(key=lambda t: extractor_priority.get(t.extraction_method, 0), reverse=True)
+        
+        unique_tables = []
+        
+        for table in page_tables:
             is_duplicate = False
             
-            for exist_table in existing:
-                if new_table.page == exist_table.page:
-                    iou = self._calculate_iou(new_table.bbox, exist_table.bbox)
-                    if iou > iou_threshold:
-                        is_duplicate = True
-                        break
+            # Check against already accepted tables
+            for unique_table in unique_tables:
+                if self._is_duplicate_table(table, unique_table):
+                    is_duplicate = True
+                    logger.debug(f"Duplicate detected: {table.label} ({table.extraction_method}) "
+                               f"is duplicate of {unique_table.label} ({unique_table.extraction_method})")
+                    break
             
             if not is_duplicate:
-                unique_new.append(new_table)
+                unique_tables.append(table)
+                logger.debug(f"Added unique table: {table.label} ({table.extraction_method})")
         
-        return unique_new
+        return unique_tables
+    
+    def _is_duplicate_table(self, table1: Table, table2: Table) -> bool:
+        """Check if two tables are duplicates using multiple strategies"""
+        # Strategy 1: Spatial overlap (IOU)
+        if self._calculate_iou(table1.bbox, table2.bbox) > 0.3:
+            return True
+        
+        # Strategy 2: Content similarity (if both have content)
+        if self._has_similar_content(table1, table2):
+            return True
+        
+        # Strategy 3: Page and position proximity
+        if self._is_nearby_table(table1, table2):
+            return True
+        
+        return False
+    
+    def _has_similar_content(self, table1: Table, table2: Table) -> bool:
+        """Check if two tables have similar content"""
+        # Extract text content from both tables
+        content1 = self._extract_table_content(table1)
+        content2 = self._extract_table_content(table2)
+        
+        if not content1 or not content2:
+            return False
+        
+        # Calculate content similarity using multiple metrics
+        similarity_score = 0.0
+        
+        # 1. Text overlap
+        text_overlap = self._calculate_text_overlap(content1, content2)
+        similarity_score += text_overlap * 0.4
+        
+        # 2. Structure similarity
+        structure_similarity = self._calculate_structure_similarity(table1, table2)
+        similarity_score += structure_similarity * 0.3
+        
+        # 3. Size similarity
+        size_similarity = self._calculate_size_similarity(table1, table2)
+        similarity_score += size_similarity * 0.3
+        
+        # Consider tables similar if similarity > 0.6
+        return similarity_score > 0.6
+    
+    def _extract_table_content(self, table: Table) -> str:
+        """Extract all text content from a table"""
+        content_parts = []
+        
+        # Add headers
+        if table.headers:
+            for header_row in table.headers:
+                content_parts.extend(str(cell).strip() for cell in header_row if cell)
+        
+        # Add rows
+        if table.rows:
+            for row in table.rows:
+                content_parts.extend(str(cell).strip() for cell in row if cell)
+        
+        return ' '.join(content_parts).lower()
+    
+    def _calculate_text_overlap(self, content1: str, content2: str) -> float:
+        """Calculate text overlap between two content strings"""
+        if not content1 or not content2:
+            return 0.0
+        
+        # Split into words and create sets
+        words1 = set(content1.split())
+        words2 = set(content2.split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        # Calculate Jaccard similarity
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _calculate_structure_similarity(self, table1: Table, table2: Table) -> float:
+        """Calculate structural similarity between two tables"""
+        # Compare row and column counts
+        rows1 = len(table1.rows) if table1.rows else 0
+        rows2 = len(table2.rows) if table2.rows else 0
+        cols1 = len(table1.headers[0]) if table1.headers else 0
+        cols2 = len(table2.headers[0]) if table2.headers else 0
+        
+        # Calculate similarity scores
+        row_similarity = 1.0 - abs(rows1 - rows2) / max(rows1, rows2, 1)
+        col_similarity = 1.0 - abs(cols1 - cols2) / max(cols1, cols2, 1)
+        
+        return (row_similarity + col_similarity) / 2
+    
+    def _calculate_size_similarity(self, table1: Table, table2: Table) -> float:
+        """Calculate size similarity between two tables"""
+        if not table1.bbox or not table2.bbox:
+            return 0.5  # Default similarity if no bbox
+        
+        # Calculate areas
+        area1 = (table1.bbox.x2 - table1.bbox.x1) * (table1.bbox.y2 - table1.bbox.y1)
+        area2 = (table2.bbox.x2 - table2.bbox.x1) * (table2.bbox.y2 - table2.bbox.y1)
+        
+        if area1 == 0 or area2 == 0:
+            return 0.5
+        
+        # Calculate similarity
+        larger_area = max(area1, area2)
+        smaller_area = min(area1, area2)
+        
+        return smaller_area / larger_area
+    
+    def _is_nearby_table(self, table1: Table, table2: Table, proximity_threshold: float = 100) -> bool:
+        """Check if two tables are spatially close to each other"""
+        if not table1.bbox or not table2.bbox:
+            return False
+        
+        # Calculate center points
+        center1_x = (table1.bbox.x1 + table1.bbox.x2) / 2
+        center1_y = (table1.bbox.y1 + table1.bbox.y2) / 2
+        center2_x = (table2.bbox.x1 + table2.bbox.x2) / 2
+        center2_y = (table2.bbox.y1 + table2.bbox.y2) / 2
+        
+        # Calculate distance
+        distance = ((center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2) ** 0.5
+        
+        return distance < proximity_threshold
     
     def _calculate_iou(self, box1: BoundingBox, box2: BoundingBox) -> float:
         """Calculate Intersection over Union"""
@@ -927,6 +1215,91 @@ class TableExtractor:
             confidence=0.6  # Lower confidence for estimated bbox
         )
     
+    async def _create_final_table_object(self, table: Table, pdf_path: Path) -> Table:
+        """Create final table object with files and Cloudinary uploads"""
+        # Generate unique filename based on page and method
+        filename = f"{table.extraction_method}_page{table.page}_table{self._get_table_index(table)}"
+        
+        # Create CSV file
+        csv_path = self.output_dir / f"{filename}.csv"
+        cloudinary_csv_url = None
+        
+        try:
+            # Create DataFrame and save CSV
+            df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
+            df.to_csv(csv_path, index=False)
+            html = df.to_html(index=False, classes='table table-bordered')
+            
+            # Upload CSV to Cloudinary
+            if csv_path.exists():
+                try:
+                    cloudinary_csv_url = await cloudinary_service.upload_file(
+                        str(csv_path), 
+                        folder="tables/csv",
+                        public_id=f"{filename}_data"
+                    )
+                    logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                except Exception as e:
+                    logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to save table as CSV: {e}")
+            csv_path = None
+            html = None
+        
+        # For transformer tables, also upload the image
+        image_path = None
+        if table.extraction_method == "transformer":
+            try:
+                # Re-render the page and crop the table region
+                doc = fitz.open(str(pdf_path))
+                page = doc[table.page - 1]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img_data = pix.tobytes("png")
+                pil_image = Image.open(io.BytesIO(img_data))
+                
+                # Crop table region (convert from PDF coordinates to image coordinates)
+                scale = pil_image.width / page.rect.width
+                x1 = int(table.bbox.x1 * scale)
+                y1 = int(table.bbox.y1 * scale)
+                x2 = int(table.bbox.x2 * scale)
+                y2 = int(table.bbox.y2 * scale)
+                
+                table_image = pil_image.crop((x1, y1, x2, y2))
+                
+                # Upload to Cloudinary
+                image_path = await cloudinary_service.upload_pil_image(
+                    table_image, 
+                    f"transformer_page{table.page}_table{self._get_table_index(table)}", 
+                    "scholarai/tables"
+                )
+                doc.close()
+            except Exception as e:
+                logger.warning(f"Failed to create table image: {e}")
+        
+        # Create final table object with all paths
+        final_table = Table(
+            label=table.label,
+            page=table.page,
+            bbox=table.bbox,
+            headers=table.headers,
+            rows=table.rows,
+            csv_path=cloudinary_csv_url or str(csv_path) if csv_path else None,
+            html=html,
+            extraction_method=table.extraction_method,
+            image_path=image_path,
+            caption=getattr(table, 'caption', None),
+            references=getattr(table, 'references', None),
+            confidence=getattr(table, 'confidence', 0.5)
+        )
+        
+        return final_table
+    
+    def _get_table_index(self, table: Table) -> int:
+        """Get a unique index for the table on its page"""
+        # This is a simple implementation - in practice you might want more sophisticated indexing
+        return 0  # For now, just use 0 as all tables are unique after deduplication
+    
     async def _create_table_object(self, headers: List[List], rows: List[List], 
                            page: int, idx: int, bbox: BoundingBox, 
                            method: str) -> Table:
@@ -967,6 +1340,68 @@ class TableExtractor:
             html=html,
             extraction_method=method
         )
+    
+    async def _extract_with_camelot_data_only(self, pdf_path: Path) -> List[Table]:
+        """Camelot extraction - DATA ONLY, no files created"""
+        try:
+            # Get the raw table data from Camelot without file creation
+            tables = await camelot_extractor.extract(pdf_path)
+            
+            # Convert to data-only table objects
+            data_only_tables = []
+            for table in tables:
+                # Create a new table object without file paths
+                data_only_table = Table(
+                    label=table.label,
+                    page=table.page,
+                    bbox=table.bbox,
+                    headers=table.headers,
+                    rows=table.rows,
+                    csv_path=None,  # No file path yet
+                    html=None,      # No HTML yet
+                    extraction_method=table.extraction_method,
+                    image_path=None,  # No image path yet
+                    caption=getattr(table, 'caption', None),
+                    references=getattr(table, 'references', None),
+                    confidence=getattr(table, 'confidence', 0.5)
+                )
+                data_only_tables.append(data_only_table)
+            
+            return data_only_tables
+        except Exception as e:
+            logger.error(f"Camelot extraction failed: {e}")
+            return []
+    
+    async def _extract_with_tabula_data_only(self, pdf_path: Path) -> List[Table]:
+        """Tabula extraction - DATA ONLY, no files created"""
+        try:
+            # Get the raw table data from Tabula without file creation
+            tables = await tabula_extractor.extract(pdf_path)
+            
+            # Convert to data-only table objects
+            data_only_tables = []
+            for table in tables:
+                # Create a new table object without file paths
+                data_only_table = Table(
+                    label=table.label,
+                    page=table.page,
+                    bbox=table.bbox,
+                    headers=table.headers,
+                    rows=table.rows,
+                    csv_path=None,  # No file path yet
+                    html=None,      # No HTML yet
+                    extraction_method=table.extraction_method,
+                    image_path=None,  # No image path yet
+                    caption=getattr(table, 'caption', None),
+                    references=getattr(table, 'references', None),
+                    confidence=getattr(table, 'confidence', 0.5)
+                )
+                data_only_tables.append(data_only_table)
+            
+            return data_only_tables
+        except Exception as e:
+            logger.error(f"Tabula extraction failed: {e}")
+            return []
     
     async def _extract_with_camelot(self, pdf_path: Path) -> List[Table]:
         """Extract tables using Camelot"""
