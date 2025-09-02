@@ -300,62 +300,92 @@ class TableExtractor:
         return unique_tables
     
     async def _process_and_store_table(self, table: Table, pdf_path: Path) -> Optional[Table]:
-        """Process table and store it locally and in Cloudinary"""
+        """Process table and store it based on STORE_LOCALLY setting"""
         try:
             # Generate unique filename
             filename = f"{table.extraction_method}_page{table.page}_table{table.id.split('_')[-1]}"
             
-            # Create CSV file
-            csv_path = self.output_dir / f"{filename}.csv"
             html_content = None
-            
-            try:
-                # Create DataFrame and save CSV
-                df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
-                df.to_csv(csv_path, index=False)
-                html_content = df.to_html(index=False, classes='table table-bordered')
-                
-                logger.info(f"Created CSV file: {csv_path}")
-            except Exception as e:
-                logger.error(f"Failed to create CSV for table {table.id}: {e}")
-                return None
-            
-            # Upload CSV to Cloudinary
             cloudinary_csv_url = None
-            try:
-                if csv_path.exists():
-                    cloudinary_csv_url = await cloudinary_service.upload_file(
-                        str(csv_path), 
+            
+            if settings.store_locally:
+                # Store locally if enabled
+                csv_path = self.output_dir / f"{filename}.csv"
+                try:
+                    # Create DataFrame and save CSV
+                    df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
+                    df.to_csv(csv_path, index=False)
+                    html_content = df.to_html(index=False, classes='table table-bordered')
+                    
+                    logger.info(f"Created CSV file: {csv_path}")
+                except Exception as e:
+                    logger.error(f"Failed to create CSV for table {table.id}: {e}")
+                    return None
+                
+                # Upload CSV to Cloudinary
+                try:
+                    if csv_path.exists():
+                        cloudinary_csv_url = await cloudinary_service.upload_file(
+                            str(csv_path), 
+                            folder="tables/csv",
+                            public_id=f"{filename}_data"
+                        )
+                        logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
+                except Exception as e:
+                    logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
+                    
+                # Update table object with file paths
+                table.csv_path = cloudinary_csv_url or str(csv_path)
+                
+                # Save table metadata to JSON
+                json_path = self.output_dir / f"{filename}.json"
+                try:
+                    table_dict = {
+                        "id": table.id,
+                        "page": table.page,
+                        "extraction_method": table.extraction_method,
+                        "headers": table.headers,
+                        "rows": table.rows,
+                        "csv_path": table.csv_path,
+                        "extraction_timestamp": pd.Timestamp.now().isoformat()
+                    }
+                    
+                    with open(json_path, 'w', encoding='utf-8') as f:
+                        json.dump(table_dict, f, indent=2, ensure_ascii=False)
+                    
+                    logger.info(f"Saved table metadata: {json_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save table metadata: {e}")
+            else:
+                # Only store in Cloudinary, not locally
+                try:
+                    # Create DataFrame in memory
+                    df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
+                    html_content = df.to_html(index=False, classes='table table-bordered')
+                    
+                    # Convert DataFrame to CSV bytes for Cloudinary upload
+                    csv_buffer = io.BytesIO()
+                    df.to_csv(csv_buffer, index=False)
+                    csv_bytes = csv_buffer.getvalue()
+                    
+                    # Upload CSV bytes to Cloudinary
+                    cloudinary_csv_url = await cloudinary_service.upload_bytes(
+                        csv_bytes, 
                         folder="tables/csv",
-                        public_id=f"{filename}_data"
+                        public_id=f"{filename}_data",
+                        file_extension=".csv"
                     )
                     logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
-            except Exception as e:
-                logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
-                
-            # Update table object with file paths
-            table.csv_path = cloudinary_csv_url or str(csv_path)
-            table.html = html_content
+                    
+                    # Update table object with Cloudinary URL
+                    table.csv_path = cloudinary_csv_url
+                    
+                except Exception as e:
+                    logger.error(f"Failed to upload CSV to Cloudinary: {e}")
+                    return None
             
-            # Save table metadata to JSON
-            json_path = self.output_dir / f"{filename}.json"
-            try:
-                table_dict = {
-                    "id": table.id,
-                    "page": table.page,
-                    "extraction_method": table.extraction_method,
-                    "headers": table.headers,
-                    "rows": table.rows,
-                    "csv_path": table.csv_path,
-                    "extraction_timestamp": pd.Timestamp.now().isoformat()
-                }
-                
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(table_dict, f, indent=2, ensure_ascii=False)
-                
-                logger.info(f"Saved table metadata: {json_path}")
-            except Exception as e:
-                logger.error(f"Failed to save table metadata: {e}")
+            # Set HTML content
+            table.html = html_content
             
             return table
             

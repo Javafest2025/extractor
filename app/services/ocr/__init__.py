@@ -1,8 +1,6 @@
 # OCR service module
-from .base_ocr import BaseOCRService
-from .easyocr_service import EasyOCRService
+from .ocr_manager import OCRManager
 
 __all__ = [
-    'BaseOCRService',
-    'EasyOCRService'
+    'OCRManager'
 ]

@@ -212,6 +212,49 @@ class CloudinaryService:
             logger.error(f"Failed to upload file to Cloudinary: {e}")
             return None
     
+    async def upload_bytes(self, file_bytes: bytes, folder: str = "scholarai/files", public_id: str = None, file_extension: str = ".txt") -> Optional[str]:
+        """Upload bytes to Cloudinary"""
+        if not self.is_configured:
+            logger.warning("Cloudinary not configured, skipping upload")
+            return None
+        
+        try:
+            # Determine resource type based on file extension
+            resource_type = 'raw'  # default for bytes
+            
+            # For CSV files, use 'raw' resource type
+            if file_extension == '.csv':
+                resource_type = 'raw'
+            elif file_extension in ['.pdf', '.doc', '.docx', '.txt']:
+                resource_type = 'raw'
+            
+            # Create a temporary file-like object
+            file_obj = io.BytesIO(file_bytes)
+            
+            # Upload bytes to Cloudinary
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: cloudinary.uploader.upload(
+                    file_obj,
+                    folder=folder,
+                    public_id=public_id,
+                    resource_type=resource_type
+                )
+            )
+            
+            # Return the secure URL
+            cloudinary_url = result.get('secure_url')
+            if cloudinary_url:
+                logger.info(f"Bytes uploaded to Cloudinary: {cloudinary_url}")
+                return cloudinary_url
+            else:
+                logger.error("Failed to get Cloudinary URL from upload result")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to upload bytes to Cloudinary: {e}")
+            return None
+    
     def is_service_available(self) -> bool:
         """Check if Cloudinary service is available"""
         return self.is_configured

@@ -19,6 +19,7 @@ from app.config import settings
 from app.utils.exceptions import ExtractionError
 # OCR functionality removed for memory optimization
 from app.services.cloudinary_service import cloudinary_service
+from app.services.ocr.ocr_manager import OCRManager
 
 
 @dataclass
@@ -45,8 +46,12 @@ class FigureExtractor:
         self.output_dir = output_dir or settings.paper_folder / "figures"
         self.output_dir.mkdir(exist_ok=True, parents=True)
         
-        # OCR disabled for memory optimization
-        logger.info("OCR functionality disabled for memory optimization")
+        # Initialize OCR manager if OCR is enabled
+        self.ocr_manager = OCRManager() if settings.use_ocr else None
+        if self.ocr_manager and self.ocr_manager.is_any_provider_available():
+            logger.info("OCR functionality enabled with OCR.space integration")
+        else:
+            logger.info("OCR functionality disabled - use_ocr=False or no providers available")
         
         # Caption detection patterns
         self.CAPTION_PATTERNS = [
@@ -64,8 +69,10 @@ class FigureExtractor:
 
     
     def _is_ocr_available(self):
-        """OCR disabled for memory optimization"""
-        return False
+        """Check if OCR is available and enabled"""
+        return (self.ocr_manager is not None and 
+                self.ocr_manager.is_any_provider_available() and 
+                settings.use_ocr)
     
     async def extract(self, pdf_path: Path) -> List[Figure]:
         """
@@ -186,15 +193,28 @@ class FigureExtractor:
                                     )
                                     logger.debug(f"Uploaded PDFPlumber image to Cloudinary: {image_path}")
                                 
-                                # Create candidate
+                                # Extract caption using PDFPlumber text
+                                pdfplumber_caption = self._extract_caption_near_image(page, img_info)
+                                
+                                # Always use OCR to extract text from the figure image itself
+                                ocr_text = ""
+                                if self._is_ocr_available():
+                                    ocr_result = await self._extract_text_from_figure_image(image_path)
+                                    if ocr_result:
+                                        ocr_text = ocr_result.get('text', '')
+                                        logger.debug(f"OCR extracted {len(ocr_text)} characters from figure {page_num}.{img_idx}")
+                                
+                                # Create candidate with both caption and OCR text
                                 candidate = FigureCandidate(
                                     bbox=bbox,
                                     confidence=0.9,
                                     method='pdfplumber',
                                     image_path=image_path,
-                                    caption=self._extract_caption_near_image(page, img_info),
+                                    caption=pdfplumber_caption,
                                     label=f"Figure {page_num}.{img_idx}",
-                                    page=page_num
+                                    page=page_num,
+                                    ocr_text=ocr_text,  # Store OCR extracted text from the figure
+                                    ocr_confidence=0.8 if ocr_text else None
                                 )
                                 candidates.append(candidate)
                                 
@@ -330,7 +350,7 @@ class FigureExtractor:
         return candidates
     
     def _extract_caption_near_image(self, page, img_info: dict) -> str:
-        """Extract caption text near the image"""
+        """Extract caption text near the image using PDFPlumber and OCR"""
         try:
             # Look for text near the image using PDFPlumber coordinate system
             # PDFPlumber uses 'top' and 'bottom' for Y coordinates
@@ -362,6 +382,146 @@ class FigureExtractor:
             
         except Exception as e:
             logger.warning(f"Caption extraction failed: {e}")
+            return ""
+    
+    async def _extract_text_from_figure_image(self, image_path: str) -> Optional[Dict[str, Any]]:
+        """Extract text content from the figure image itself using OCR"""
+        try:
+            if not self._is_ocr_available():
+                logger.debug("OCR not available for figure text extraction")
+                return None
+            
+            if not image_path:
+                logger.debug("Image path is empty")
+                return None
+            
+            # Smart handling based on storage strategy
+            if settings.store_locally:
+                # Local storage mode: use local file path
+                if Path(image_path).exists():
+                    ocr_result = await self.ocr_manager.extract_text(Path(image_path))
+                    if not ocr_result:
+                        logger.debug("OCR extraction returned no results for local figure")
+                        return None
+                    
+                    extracted_text = ocr_result.get('text', '')
+                    if not extracted_text.strip():
+                        logger.debug("OCR extracted no text content from local figure")
+                        return None
+                    
+                    logger.debug(f"OCR successfully extracted {len(extracted_text)} characters from local figure")
+                    return ocr_result
+                else:
+                    logger.debug(f"Local image path not found: {image_path}")
+                    return None
+            else:
+                # Cloud-only mode: use Cloudinary URL directly
+                if image_path.startswith('http'):
+                    # Send Cloudinary URL directly to OCR.space API
+                    return await self._extract_text_from_cloudinary_url(image_path)
+                else:
+                    logger.debug(f"Expected Cloudinary URL but got: {image_path}")
+                    return None
+            
+        except Exception as e:
+            logger.warning(f"OCR figure text extraction failed: {e}")
+            return None
+    
+    async def _extract_text_from_cloudinary_url(self, cloudinary_url: str) -> Optional[Dict[str, Any]]:
+        """Extract text from Cloudinary image URL directly using OCR.space API"""
+        try:
+            logger.debug(f"Processing Cloudinary image URL directly for OCR: {cloudinary_url}")
+            
+            # Use OCR manager to extract text directly from URL
+            # The OCR manager will handle the URL-based extraction
+            ocr_result = await self.ocr_manager.extract_text_from_url(cloudinary_url)
+            
+            if not ocr_result:
+                logger.debug("OCR extraction returned no results for Cloudinary image URL")
+                return None
+            
+            extracted_text = ocr_result.get('text', '')
+            if not extracted_text.strip():
+                logger.debug("OCR extracted no text content from Cloudinary image URL")
+                return None
+            
+            logger.debug(f"OCR successfully extracted {len(extracted_text)} characters from Cloudinary image URL")
+            return ocr_result
+            
+        except Exception as e:
+            logger.warning(f"Failed to process Cloudinary image URL for OCR: {e}")
+            return None
+    
+    async def _extract_caption_with_ocr(self, image_path: str) -> str:
+        """Extract caption from image using OCR when available"""
+        try:
+            if not self._is_ocr_available():
+                logger.debug("OCR not available for caption extraction")
+                return ""
+            
+            if not image_path or not Path(image_path).exists():
+                logger.debug(f"Image path not valid for OCR: {image_path}")
+                return ""
+            
+            # Use OCR to extract text from the image
+            ocr_result = await self.ocr_manager.extract_text(Path(image_path))
+            if not ocr_result:
+                logger.debug("OCR extraction returned no results")
+                return ""
+            
+            extracted_text = ocr_result.get('text', '')
+            if not extracted_text.strip():
+                logger.debug("OCR extracted no text content")
+                return ""
+            
+            # Look for caption patterns in OCR text
+            caption_text = self._extract_caption_from_ocr_text(extracted_text)
+            
+            if caption_text:
+                logger.debug(f"OCR extracted caption: {caption_text[:100]}...")
+            else:
+                logger.debug("No caption pattern found in OCR text")
+            
+            return caption_text
+            
+        except Exception as e:
+            logger.warning(f"OCR caption extraction failed: {e}")
+            return ""
+    
+    def _extract_caption_from_ocr_text(self, ocr_text: str) -> str:
+        """Extract caption from OCR text using pattern matching"""
+        try:
+            if not ocr_text or not ocr_text.strip():
+                return ""
+            
+            # Look for caption patterns in OCR text
+            for pattern in self.CAPTION_PATTERNS:
+                matches = re.finditer(pattern, ocr_text, re.IGNORECASE)
+                for match in matches:
+                    # Extract the caption part (group 2 if available, otherwise full match)
+                    if len(match.groups()) >= 2 and match.group(2):
+                        caption = match.group(2).strip()
+                    else:
+                        caption = match.group(0).strip()
+                    
+                    if caption and len(caption) > 5:  # Minimum caption length
+                        return caption
+            
+            # If no pattern matches, try to extract meaningful text
+            # Look for lines that might be captions (not too long, not too short)
+            lines = ocr_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if (len(line) > 10 and len(line) < 200 and  # Reasonable caption length
+                    not line.isdigit() and  # Not just numbers
+                    not line.startswith('http') and  # Not URLs
+                    any(char.isalpha() for char in line)):  # Contains letters
+                    return line
+            
+            return ""
+            
+        except Exception as e:
+            logger.warning(f"Caption pattern extraction from OCR text failed: {e}")
             return ""
     
     async def _extract_with_cv(self, pdf_path: Path) -> List[FigureCandidate]:
@@ -1477,7 +1637,7 @@ class FigureExtractor:
             extraction_method=candidate.method,
             confidence=candidate.confidence,
             image_path=candidate.image_path,
-            # OCR functionality removed for memory optimization
-            ocr_text=None,
-            ocr_confidence=None
+            # Include OCR extracted text from the figure image
+            ocr_text=candidate.ocr_text,
+            ocr_confidence=candidate.ocr_confidence
         )
