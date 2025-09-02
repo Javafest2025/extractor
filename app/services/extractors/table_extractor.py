@@ -80,7 +80,7 @@ class TableExtractor:
             tabula_tables = await tabula_extractor.extract(pdf_path)
             all_tables.extend(tabula_tables)
             logger.info(f"Tabula found {len(tabula_tables)} tables")
-            except Exception as e:
+        except Exception as e:
             logger.warning(f"Tabula extraction failed: {e}")
         
         # Deduplicate and validate tables
@@ -107,15 +107,15 @@ class TableExtractor:
         tables = []
         try:
             with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                page_tables = page.extract_tables()
+                for page_num, page in enumerate(pdf.pages, 1):
+                    page_tables = page.extract_tables()
                     if page_tables:
                         for table_idx, table_data in enumerate(page_tables):
                             if self._is_valid_table_data(table_data):
                                 table = self._create_table_from_data(
                                     table_data, page_num, table_idx, "pdfplumber"
-                    )
-                    tables.append(table)
+                                )
+                                tables.append(table)
         except Exception as e:
             logger.error(f"PDFPlumber extraction failed: {e}")
         
@@ -125,7 +125,7 @@ class TableExtractor:
         """Extract tables using PyMuPDF"""
         tables = []
         try:
-        doc = fitz.open(str(pdf_path))
+            doc = fitz.open(str(pdf_path))
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 # Extract tables using PyMuPDF's table finder
@@ -134,9 +134,9 @@ class TableExtractor:
                     if self._is_valid_table_data(table_data):
                         table = self._create_table_from_data(
                             table_data, page_num + 1, table_idx, "pymupdf"
-                )
-                tables.append(table)
-        doc.close()
+                        )
+                        tables.append(table)
+            doc.close()
         except Exception as e:
             logger.error(f"PyMuPDF extraction failed: {e}")
         
@@ -180,10 +180,10 @@ class TableExtractor:
         return Table(
             id=f"{method}_page{page_num}_table{table_idx}",
             label=f"Table {page_num}.{table_idx}",
-                    page=page_num,
+            page=page_num,
             bbox=bbox,
             headers=[headers] if headers else [],
-                    rows=rows,
+            rows=rows,
             extraction_method=method,
             csv_path=None,
             html=None,
@@ -230,33 +230,33 @@ class TableExtractor:
             # Generate unique filename
             filename = f"{table.extraction_method}_page{table.page}_table{table.id.split('_')[-1]}"
         
-        # Create CSV file
-        csv_path = self.output_dir / f"{filename}.csv"
+            # Create CSV file
+            csv_path = self.output_dir / f"{filename}.csv"
             html_content = None
         
-        try:
-            # Create DataFrame and save CSV
-            df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
-            df.to_csv(csv_path, index=False)
+            try:
+                # Create DataFrame and save CSV
+                df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
+                df.to_csv(csv_path, index=False)
                 html_content = df.to_html(index=False, classes='table table-bordered')
                 
                 logger.info(f"Created CSV file: {csv_path}")
-                except Exception as e:
+            except Exception as e:
                 logger.error(f"Failed to create CSV for table {table.id}: {e}")
                 return None
             
             # Upload CSV to Cloudinary
-        cloudinary_csv_url = None
-        try:
-            if csv_path.exists():
+            cloudinary_csv_url = None
+            try:
+                if csv_path.exists():
                     cloudinary_csv_url = await cloudinary_service.upload_file(
                         str(csv_path), 
                         folder="tables/csv",
                         public_id=f"{filename}_data"
                     )
                     logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
-                except Exception as e:
-                    logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
                     
             # Update table object with file paths
             table.csv_path = cloudinary_csv_url or str(csv_path)
@@ -279,7 +279,7 @@ class TableExtractor:
                     json.dump(table_dict, f, indent=2, ensure_ascii=False)
                 
                 logger.info(f"Saved table metadata: {json_path}")
-        except Exception as e:
+            except Exception as e:
                 logger.error(f"Failed to save table metadata: {e}")
             
             return table
