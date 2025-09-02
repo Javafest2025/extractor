@@ -98,7 +98,7 @@ class TableExtractor:
                         for table_idx, table_data in enumerate(page_tables):
                             if self._is_valid_table_data(table_data):
                                 table = self._create_table_from_data(
-                                    table_data, page_num, table_idx, "pdfplumber"
+                                    table_data, page_num, table_idx, "pdfplumber", page
                                 )
                                 tables.append(table)
         except Exception as e:
@@ -126,7 +126,110 @@ class TableExtractor:
         
         return has_content
     
-    def _create_table_from_data(self, table_data, page_num: int, table_idx: int, method: str) -> Table:
+    def _extract_caption_near_table(self, page, table_data, page_num: int, table_idx: int) -> str:
+        """Extract caption text near the table"""
+        try:
+            caption_text = ""
+            
+            # Get table position information from PDFPlumber
+            if hasattr(page, 'find_tables'):
+                # Try to find the specific table to get its position
+                tables = page.find_tables()
+                if table_idx < len(tables):
+                    table_bbox = tables[table_idx].bbox
+                    if table_bbox:
+                        # Extract caption below the table (most common)
+                        caption_text = self._search_caption_below_table(page, table_bbox)
+                        
+                        # If no caption below, search above
+                        if not caption_text.strip():
+                            caption_text = self._search_caption_above_table(page, table_bbox)
+            
+            # Fallback: search for text patterns that look like table captions
+            if not caption_text.strip():
+                caption_text = self._search_table_caption_patterns(page, page_num, table_idx)
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.warning(f"Caption extraction failed for table {page_num}.{table_idx}: {e}")
+            return ""
+    
+    def _search_caption_below_table(self, page, table_bbox) -> str:
+        """Search for caption text below the table"""
+        try:
+            caption_text = ""
+            
+            # Search for text below the table
+            for word in page.extract_words():
+                word_x0, word_top, word_x1, word_bottom = word['x0'], word['top'], word['x1'], word['bottom']
+                
+                # Check if word is below table (within reasonable distance)
+                if (word_top > table_bbox[3] and word_top < table_bbox[3] + 150 and
+                    abs(word_x0 - (table_bbox[0] + table_bbox[2]) / 2) < 100):
+                    caption_text += word['text'] + " "
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.debug(f"Below table caption search failed: {e}")
+            return ""
+    
+    def _search_caption_above_table(self, page, table_bbox) -> str:
+        """Search for caption text above the table"""
+        try:
+            caption_text = ""
+            
+            # Search for text above the table
+            for word in page.extract_words():
+                word_x0, word_top, word_x1, word_bottom = word['x0'], word['top'], word['x1'], word['bottom']
+                
+                # Check if word is above table (within reasonable distance)
+                if (word_bottom < table_bbox[1] and word_bottom > table_bbox[1] - 150 and
+                    abs(word_x0 - (table_bbox[0] + table_bbox[2]) / 2) < 100):
+                    caption_text += word['text'] + " "
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.debug(f"Above table caption search failed: {e}")
+            return ""
+    
+    def _search_table_caption_patterns(self, page, page_num: int, table_idx: int) -> str:
+        """Search for table caption patterns in text"""
+        try:
+            caption_text = ""
+            
+            # Look for common table caption patterns
+            caption_patterns = [
+                f"Table {page_num}.{table_idx}",
+                f"Table {page_num}.{table_idx + 1}",  # Sometimes 1-indexed
+                f"TABLE {page_num}.{table_idx}",
+                f"TABLE {page_num}.{table_idx + 1}",
+                f"Table {page_num}",
+                f"TABLE {page_num}"
+            ]
+            
+            # Extract all text from the page
+            page_text = page.extract_text()
+            if page_text:
+                # Look for caption patterns
+                for pattern in caption_patterns:
+                    if pattern in page_text:
+                        # Extract text around the pattern
+                        pattern_index = page_text.find(pattern)
+                        start = max(0, pattern_index - 200)
+                        end = min(len(page_text), pattern_index + 200)
+                        caption_text = page_text[start:end].strip()
+                        break
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.debug(f"Pattern-based caption search failed: {e}")
+            return ""
+    
+    def _create_table_from_data(self, table_data, page_num: int, table_idx: int, method: str, page=None) -> Table:
         """Create Table object from extracted data"""
         # Convert table data to DataFrame for easier processing
         df = pd.DataFrame(table_data)
@@ -143,13 +246,19 @@ class TableExtractor:
             x1=0, y1=0, x2=100, y2=100, page=page_num, confidence=0.8
         )
         
+        # Extract caption if page object is provided
+        caption = None
+        if page:
+            caption = self._extract_caption_near_table(page, table_data, page_num, table_idx)
+        
         return Table(
             id=f"{method}_page{page_num}_table{table_idx}",
             label=f"Table {page_num}.{table_idx}",
-                    page=page_num,
+            caption=caption,
+            page=page_num,
             bbox=bbox,
             headers=[headers] if headers else [],
-                    rows=rows,
+            rows=rows,
             extraction_method=method,
             csv_path=None,
             html=None,

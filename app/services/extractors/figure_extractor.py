@@ -332,28 +332,29 @@ class FigureExtractor:
     def _extract_caption_near_image(self, page, img_info: dict) -> str:
         """Extract caption text near the image"""
         try:
-            # Look for text near the image
-            img_x0, img_y0, img_x1, img_y1 = img_info['x0'], img_info['y0'], img_info['x1'], img_info['y1']
+            # Look for text near the image using PDFPlumber coordinate system
+            # PDFPlumber uses 'top' and 'bottom' for Y coordinates
+            img_x0, img_top, img_x1, img_bottom = img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom']
             
             # Search for text below or above the image
             caption_text = ""
             
-            # Check below image first
+            # Check below image first (text below has higher Y values in PDFPlumber)
             for word in page.extract_words():
-                word_x0, word_y0, word_x1, word_y1 = word['x0'], word['y0'], word['x1'], word['y1']
+                word_x0, word_top, word_x1, word_bottom = word['x0'], word['top'], word['x1'], word['bottom']
                 
                 # Check if word is below image (within reasonable distance)
-                if (word_y0 > img_y1 and word_y0 < img_y1 + 100 and
+                if (word_top > img_bottom and word_top < img_bottom + 100 and
                     abs(word_x0 - img_x0) < 50):
                     caption_text += word['text'] + " "
             
             # If no text below, check above
             if not caption_text.strip():
                 for word in page.extract_words():
-                    word_x0, word_y0, word_x1, word_y1 = word['x0'], word['y0'], word['x1'], word['y1']
+                    word_x0, word_top, word_x1, word_bottom = word['x0'], word['top'], word['x1'], word['bottom']
                     
                     # Check if word is above image (within reasonable distance)
-                    if (word_y1 < img_y0 and word_y1 > img_y0 - 100 and
+                    if (word_bottom < img_top and word_bottom > img_top - 100 and
                         abs(word_x0 - img_x0) < 50):
                         caption_text += word['text'] + " "
             

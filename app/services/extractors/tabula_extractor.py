@@ -34,6 +34,60 @@ class TabulaExtractor:
                 logger.error(f"Tabula not available: {e}")
                 raise ImportError("Tabula not installed. Install with: pip install tabula-py")
     
+    def _extract_caption_for_tabula_table(self, pdf_path: Path, page_num: int, table_idx: int) -> str:
+        """Extract caption for Tabula tables using PDFPlumber for text extraction"""
+        try:
+            import pdfplumber
+            
+            with pdfplumber.open(pdf_path) as pdf:
+                if page_num <= len(pdf.pages):
+                    page = pdf.pages[page_num - 1]
+                    
+                    # Search for table caption patterns
+                    caption_text = self._search_table_caption_patterns(page, page_num, table_idx)
+                    
+                    return caption_text.strip()
+                    
+        except Exception as e:
+            logger.debug(f"Caption extraction failed for Tabula table {page_num}.{table_idx}: {e}")
+            return ""
+        
+        return ""
+    
+    def _search_table_caption_patterns(self, page, page_num: int, table_idx: int) -> str:
+        """Search for table caption patterns in text"""
+        try:
+            caption_text = ""
+            
+            # Look for common table caption patterns
+            caption_patterns = [
+                f"Table {page_num}.{table_idx}",
+                f"Table {page_num}.{table_idx + 1}",  # Sometimes 1-indexed
+                f"TABLE {page_num}.{table_idx}",
+                f"TABLE {page_num}.{table_idx + 1}",
+                f"Table {page_num}",
+                f"TABLE {page_num}"
+            ]
+            
+            # Extract all text from the page
+            page_text = page.extract_text()
+            if page_text:
+                # Look for caption patterns
+                for pattern in caption_patterns:
+                    if pattern in page_text:
+                        # Extract text around the pattern
+                        pattern_index = page_text.find(pattern)
+                        start = max(0, pattern_index - 200)
+                        end = min(len(page_text), pattern_index + 200)
+                        caption_text = page_text[start:end].strip()
+                        break
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.debug(f"Pattern-based caption search failed: {e}")
+            return ""
+    
     async def extract(self, pdf_path: Path) -> List[Table]:
         """Extract tables using Tabula"""
         await self._ensure_initialized()
@@ -108,9 +162,13 @@ class TabulaExtractor:
                             confidence=0.7  # Default confidence
                         )
                         
+                        # Try to extract caption for Tabula tables
+                        caption = self._extract_caption_for_tabula_table(pdf_path, page_idx + 1, table_idx)
+                        
                         # Create table object WITHOUT files or Cloudinary uploads
                         table_obj = Table(
                             label=f"Table {page_idx + 1}.{table_idx}",
+                            caption=caption,
                             page=page_idx + 1,
                             bbox=bbox_obj,
                             headers=[headers] if headers else [],
