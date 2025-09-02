@@ -90,6 +90,18 @@ rebuild_nocache() {
     print_success "Docker image rebuilt successfully without cache!"
 }
 
+# Function to build optimized image for production
+build_optimized() {
+    print_status "Building optimized Docker image for $APP_NAME..."
+    
+    create_network
+    
+    # Build with BuildKit for better optimization
+    DOCKER_BUILDKIT=1 docker-compose build --parallel
+    
+    print_success "Optimized Docker image built successfully!"
+}
+
 # Function to start the container
 run() {
     print_status "Starting $APP_NAME container..."
@@ -151,6 +163,22 @@ status() {
     fi
 }
 
+# Function to show image size information
+size() {
+    print_status "Checking image sizes..."
+    
+    echo "Image sizes:"
+    docker images | grep "$APP_NAME"
+    
+    echo ""
+    echo "Container resource usage:"
+    if docker ps | grep -q "$CONTAINER_NAME"; then
+        docker stats --no-stream "$CONTAINER_NAME"
+    else
+        print_warning "Container is not running"
+    fi
+}
+
 # Function to clean up
 cleanup() {
     print_status "Cleaning up $APP_NAME..."
@@ -168,19 +196,22 @@ show_help() {
     echo ""
     echo "Commands:"
     echo "  build                    Build the Docker image"
+    echo "  build-optimized          Build optimized image with BuildKit"
     echo "  rebuild-nocache          Rebuild the Docker image without cache"
     echo "  run                      Start the container"
     echo "  stop                     Stop the container"
     echo "  restart                  Restart the container"
     echo "  logs                     View container logs"
     echo "  status                   Check container status"
+    echo "  size                     Show image sizes and resource usage"
     echo "  cleanup                  Clean up containers, images, and volumes"
     echo "  help                     Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0 build                 Build the image"
+    echo "  $0 build-optimized       Build optimized image"
     echo "  $0 run                   Start the service"
-    echo "  $0 logs                  View logs"
+    echo "  $0 size                  Check resource usage"
 }
 
 # Main function
@@ -190,6 +221,9 @@ main() {
     case "${1:-help}" in
         "build")
             build
+            ;;
+        "build-optimized")
+            build_optimized
             ;;
         "rebuild-nocache")
             rebuild_nocache
@@ -208,6 +242,9 @@ main() {
             ;;
         "status")
             status
+            ;;
+        "size")
+            size
             ;;
         "cleanup")
             cleanup

@@ -5,7 +5,7 @@ python-multipart==0.0.9
 pydantic==2.6.1
 pydantic-settings==2.2.1
 
-# PDF Processing (Lightweight)
+# PDF Processing (Essential)
 pdfplumber==0.11.7
 pymupdf==1.23.22
 
@@ -36,8 +36,15 @@ cloudinary==1.36.0
 # Message Queue
 aio-pika==9.3.1
 
+# Image Processing (Essential for figure extraction)
+opencv-python-headless==4.8.1.78
+pillow==10.2.0
+
+# Numerical Computing (Essential for image processing)
+numpy==1.26.4
+
 # REMOVED: Heavy AI models (torch, transformers, easyocr)
-# REMOVED: Large ML libraries (scikit-image, matplotlib)
+# REMOVED: Large ML libraries (scikit-image, matplotlib, scipy)
 # REMOVED: Complex NLP (spacy, nltk)
 # REMOVED: Math processing (sympy, latex2sympy2)
-# REMOVED: OCR dependencies (pytesseract, opencv-python-headless, pillow)
+# REMOVED: OCR dependencies (pytesseract - using OCR.space API instead)

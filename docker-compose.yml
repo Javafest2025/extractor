@@ -40,25 +40,25 @@ services:
       - scholarai-network
     restart: unless-stopped
 
-    # —— Resource controls (Optimized for Memory) ——
-    cpus: 1.0
+    # —— Resource controls (Optimized for Size & Memory) ——
+    cpus: 0.75
     cpu_shares: 512
-    mem_limit: 1g
+    mem_limit: 768m
     mem_reservation: 512m
     # Reduced swap limit
-    memswap_limit: 1.5g
+    memswap_limit: 1g
 
     # contain process count; reap zombies
-    pids_limit: 256
+    pids_limit: 128
     init: true
 
     # Reduced shared memory
-    shm_size: "256m"
+    shm_size: "128m"
 
     ulimits:
       nofile:
-        soft: 32768
-        hard: 32768
+        soft: 16384
+        hard: 16384
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]

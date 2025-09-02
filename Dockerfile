@@ -1,11 +1,11 @@
-# Multi-stage build for PDF Extractor FastAPI Service (Optimized for Memory)
+# Multi-stage build for PDF Extractor FastAPI Service (Optimized for Size & Memory)
 # Stage 1: Build dependencies
 FROM python:3.11-slim AS builder
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for building (minimal)
+# Install only essential build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -13,8 +13,8 @@ RUN apt-get update && \
     g++ \
     pkg-config \
     wget \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Copy requirements file
 COPY requirements-prod.txt requirements-prod.txt
@@ -23,30 +23,38 @@ COPY requirements-prod.txt requirements-prod.txt
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install lightweight requirements only
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-prod.txt
 
 # Stage 2: Runtime image
 FROM python:3.11-slim
 
-# Install runtime dependencies only (minimal)
+# Install only essential runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+    # Basic system utilities
     curl \
     wget \
-    # Tesseract OCR (essential)
+    # Tesseract OCR (essential for OCR.space fallback)
     tesseract-ocr \
     tesseract-ocr-eng \
-    # Basic image processing
+    # Image processing libraries (minimal)
     libpng16-16 \
     libjpeg62-turbo \
     libtiff6 \
+    # OpenCV dependencies (minimal)
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
     # System libraries
     libgcc-s1 \
     libstdc++6 \
-    && rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && apt-get autoremove -y
 
 # Create non-root user
 RUN addgroup --system app && adduser --system --no-create-home --ingroup app app

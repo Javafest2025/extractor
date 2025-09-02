@@ -46,7 +46,7 @@ class OCRManager:
             
         except Exception as e:
             logger.error(f"OCR text extraction failed for {image_path}: {e}")
-            return None
+        return None
     
     async def extract_text_from_bytes(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
         """Extract text from image bytes using OCR.space API"""
@@ -202,7 +202,7 @@ class OCRManager:
                 
         except Exception as e:
             logger.error(f"OCR.space API call failed for URL {image_url}: {e}")
-            return None
+        return None
     
     def get_available_providers(self) -> List[str]:
         """Get available OCR providers"""

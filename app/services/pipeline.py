@@ -615,31 +615,37 @@ class ExtractionPipeline:
             return 0
     
     async def _save_result(self, result: ExtractionResult, skip_local_storage: bool = False):
-        """Save extraction result to JSON file and local storage"""
-        output_path = settings.paper_folder / f"{Path(result.pdf_path).stem}_extraction.json"
-        
+        """Save extraction result based on STORE_LOCALLY setting"""
         # Convert to dict
         result_dict = result.model_dump() if hasattr(result, 'model_dump') else result.dict()
         
-        # Save to file
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(result_dict, f, indent=2, ensure_ascii=False, default=str)
-        
-        logger.info(f"Extraction result saved to {output_path}")
-        
-        # Store locally if enabled and not skipped
-        if settings.store_locally and not skip_local_storage:
-            try:
-                # Generate a job_id and paper_id for local storage
-                job_id = f"pipeline_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                paper_id = Path(result.pdf_path).stem
-                
-                stored_paths = await local_storage_service.store_extraction_result(
-                    result, job_id, paper_id
-                )
-                logger.info(f"Stored extraction result locally: {stored_paths}")
-            except Exception as e:
-                logger.error(f"Failed to store extraction result locally: {e}")
+        if settings.store_locally:
+            # Local storage mode: save JSON file and store locally
+            output_path = settings.paper_folder / f"{Path(result.pdf_path).stem}_extraction.json"
+            
+            # Save to file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(result_dict, f, indent=2, ensure_ascii=False, default=str)
+            
+            logger.info(f"Extraction result saved to {output_path}")
+            
+            # Store locally if not skipped
+            if not skip_local_storage:
+                try:
+                    # Generate a job_id and paper_id for local storage
+                    job_id = f"pipeline_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                    paper_id = Path(result.pdf_path).stem
+                    
+                    stored_paths = await local_storage_service.store_extraction_result(
+                        result, job_id, paper_id
+                    )
+                    logger.info(f"Stored extraction result locally: {stored_paths}")
+                except Exception as e:
+                    logger.error(f"Failed to store extraction result locally: {e}")
+        else:
+            # Cloud-only mode: do not save or upload anything
+            logger.info("STORE_LOCALLY=False: Skipping extraction result storage (no local files, no Cloudinary upload)")
+            logger.debug(f"Extraction result for {Path(result.pdf_path).stem} completed but not stored")
 
     # Enhanced quality assessment and auto-correction methods
     async def _assess_initial_quality(self, result: ExtractionResult) -> Dict[str, Any]:

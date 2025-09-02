@@ -115,27 +115,55 @@ class EnhancedExtractionHandler:
     async def _load_performance_history(self):
         """Load historical performance data for adaptive processing"""
         try:
-            history_file = settings.paper_folder / "extraction_performance.json"
-            if history_file.exists():
-                with open(history_file, "r") as f:
-                    data = json.load(f)
-                    self.recent_performance = data.get("recent_performance", [])
-                    self.method_success_rates = data.get("method_success_rates", {})
-                    logger.info("Loaded extraction performance history")
+            if settings.store_locally:
+                # Local storage mode: load from file
+                history_file = settings.paper_folder / "extraction_performance.json"
+                if history_file.exists():
+                    with open(history_file, "r") as f:
+                        data = json.load(f)
+                        self.recent_performance = data.get("recent_performance", [])
+                        self.method_success_rates = data.get("method_success_rates", {})
+                        logger.info("Loaded extraction performance history from local file")
+            else:
+                # Cloud-only mode: try to load from Cloudinary
+                try:
+                    # For now, start with empty data when in cloud-only mode
+                    # In a production system, you might want to store the Cloudinary URL
+                    # and load from there, but for simplicity, we'll start fresh
+                    self.recent_performance = []
+                    self.method_success_rates = {}
+                    logger.info("Starting with empty performance history in cloud-only mode")
+                except Exception as e:
+                    logger.warning(f"Failed to load performance history from Cloudinary: {e}")
+                    # Fallback to empty data
+                    self.recent_performance = []
+                    self.method_success_rates = {}
+                    
         except Exception as e:
             logger.warning(f"Failed to load performance history: {e}")
+            # Fallback to empty data
+            self.recent_performance = []
+            self.method_success_rates = {}
 
     async def _save_performance_history(self):
-        """Save performance history for future adaptive decisions"""
+        """Save performance history based on STORE_LOCALLY setting"""
         try:
-            history_file = settings.paper_folder / "extraction_performance.json"
             data = {
                 "recent_performance": self.recent_performance[-100:],  # Keep last 100
                 "method_success_rates": self.method_success_rates,
                 "last_updated": datetime.utcnow().isoformat(),
             }
-            with open(history_file, "w") as f:
-                json.dump(data, f, indent=2, default=str)
+            
+            if settings.store_locally:
+                # Local storage mode: save to file
+                history_file = settings.paper_folder / "extraction_performance.json"
+                with open(history_file, "w") as f:
+                    json.dump(data, f, indent=2, default=str)
+                logger.debug("Performance history saved locally")
+            else:
+                # Cloud-only mode: do not save or upload anything
+                logger.debug("STORE_LOCALLY=False: Skipping performance history storage (no local files, no Cloudinary upload)")
+                    
         except Exception as e:
             logger.warning(f"Failed to save performance history: {e}")
 
