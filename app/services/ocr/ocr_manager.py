@@ -1,119 +1,41 @@
 # services/ocr/ocr_manager.py
-import asyncio
+import logging
 from typing import Optional, List, Dict, Any
 from pathlib import Path
-from loguru import logger
 
-from .base_ocr import BaseOCRService, OCRResult
-from .easyocr_service import EasyOCRService
+logger = logging.getLogger(__name__)
 
 
 class OCRManager:
     """
-    OCR Manager that handles multiple OCR providers with fallback strategies
+    OCR Manager (Disabled for Memory Optimization)
+    OCR functionality has been removed to reduce memory usage.
+    Text extraction relies on pre-extracted content from other extractors.
     """
     
     def __init__(self, **kwargs):
-        self.providers: List[BaseOCRService] = []
-        self.primary_provider: Optional[BaseOCRService] = None
-        self._initialize_providers(**kwargs)
+        self.providers = []
+        self.primary_provider = None
+        logger.info("OCR Manager initialized (OCR disabled for memory optimization)")
     
     def _initialize_providers(self, **kwargs):
-        """Initialize available OCR providers in order of preference"""
-        
-        # Provider priority order (EasyOCR only)
-        provider_classes = [
-            EasyOCRService,      # Local, no external dependencies
-        ]
-        
-        for provider_class in provider_classes:
-            try:
-                provider = provider_class(**kwargs)
-                if provider.is_service_available():
-                    self.providers.append(provider)
-                    if not self.primary_provider:
-                        self.primary_provider = provider
-                    logger.info(f"OCR provider initialized: {provider.get_provider_name()}")
-                else:
-                    logger.warning(f"OCR provider not available: {provider_class.__name__}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize {provider_class.__name__}: {e}")
-        
-        if not self.providers:
-            logger.warning("No OCR providers available")
-        else:
-            logger.info(f"OCR Manager initialized with {len(self.providers)} providers")
+        """No OCR providers available - OCR disabled for memory optimization"""
+        logger.info("No OCR providers available - OCR disabled for memory optimization")
     
-    async def extract_text(self, image_path: Path) -> Optional[OCRResult]:
-        """Extract text using the best available OCR provider"""
-        if not self.providers:
-            return None
-        
-        # Try primary provider first
-        if self.primary_provider:
-            result = await self.primary_provider.extract_text_with_fallback(image_path)
-            if result and result.text.strip():
-                return result
-        
-        # Fallback to other providers
-        for provider in self.providers:
-            if provider == self.primary_provider:
-                continue
-            
-            result = await provider.extract_text_with_fallback(image_path)
-            if result and result.text.strip():
-                logger.info(f"Using fallback OCR provider: {provider.get_provider_name()}")
-                return result
-        
+    async def extract_text(self, image_path: Path) -> Optional[Dict[str, Any]]:
+        """OCR disabled - cannot extract text from images"""
+        logger.warning("OCR disabled for memory optimization - cannot extract text from images")
         return None
     
-    async def extract_text_from_bytes(self, image_bytes: bytes) -> Optional[OCRResult]:
-        """Extract text from bytes using the best available OCR provider"""
-        if not self.providers:
-            return None
-        
-        # Try primary provider first
-        if self.primary_provider:
-            try:
-                result = await self.primary_provider.extract_text_from_bytes(image_bytes)
-                if result and result.text.strip():
-                    return result
-            except Exception as e:
-                logger.warning(f"Primary OCR provider failed: {e}")
-        
-        # Fallback to other providers
-        for provider in self.providers:
-            if provider == self.primary_provider:
-                continue
-            
-            try:
-                result = await provider.extract_text_from_bytes(image_bytes)
-                if result and result.text.strip():
-                    logger.info(f"Using fallback OCR provider: {provider.get_provider_name()}")
-                    return result
-            except Exception as e:
-                logger.warning(f"OCR provider {provider.get_provider_name()} failed: {e}")
-        
+    async def extract_text_from_bytes(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
+        """OCR disabled - cannot extract text from image bytes"""
+        logger.warning("OCR disabled for memory optimization - cannot extract text from image bytes")
         return None
     
     def get_available_providers(self) -> List[str]:
-        """Get list of available OCR providers"""
-        return [provider.get_provider_name() for provider in self.providers]
+        """No OCR providers available"""
+        return []
     
-    def is_ocr_available(self) -> bool:
-        """Check if any OCR provider is available"""
-        return len(self.providers) > 0
-    
-    async def extract_text_with_retry(self, image_path: Path, max_retries: int = 2) -> Optional[OCRResult]:
-        """Extract text with retry logic"""
-        for attempt in range(max_retries):
-            try:
-                result = await self.extract_text(image_path)
-                if result and result.text.strip():
-                    return result
-            except Exception as e:
-                logger.warning(f"OCR attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)  # Brief delay before retry
-        
-        return None
+    def is_any_provider_available(self) -> bool:
+        """No OCR providers available"""
+        return False

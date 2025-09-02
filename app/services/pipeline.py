@@ -66,7 +66,7 @@ class ExtractionPipeline:
             logger.warning(f"Enhanced table extractor initialization failed: {e}")
         
         try:
-            self.extractors['ocr_math'] = OCRMathExtractor()
+            self.extractors['ocr_math'] = OCRMathExtractor(output_dir=settings.paper_folder / "ocr_math")
             logger.info("OCR/Math extractor initialized")
         except Exception as e:
             logger.warning(f"OCR/Math extractor initialization failed: {e}")

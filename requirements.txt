@@ -9,12 +9,6 @@ pydantic-settings==2.2.1
 pdfplumber==0.11.7
 pymupdf==1.23.22
 
-# OCR & Text Extraction (Basic only)
-pytesseract==0.3.10
-pillow==10.4.0
-opencv-python-headless==4.11.0.86
-numpy==1.26.4
-
 # Table Processing (Rule-based only)
 pandas==2.3.2
 camelot-py==1.0.9
@@ -54,3 +48,4 @@ aio-pika==9.3.1
 # REMOVED: Image processing (scikit-image, matplotlib)
 # REMOVED: Table utilities (tabulate, openpyxl)
 # REMOVED: Monitoring (sentry-sdk)
+# REMOVED: OCR dependencies (pytesseract, opencv-python-headless, pillow)

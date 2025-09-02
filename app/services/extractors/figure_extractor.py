@@ -17,7 +17,7 @@ import io
 from app.models.schemas import Figure, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
-from app.services.ocr.ocr_manager import OCRManager
+# OCR functionality removed for memory optimization
 from app.services.cloudinary_service import cloudinary_service
 
 
@@ -47,8 +47,8 @@ class FigureExtractor:
         self.output_dir.mkdir(exist_ok=True, parents=True)
         self.pdffigures2_available = self._check_pdffigures2()
         
-        # Initialize OCR manager
-        self.ocr_manager = OCRManager(use_gpu=settings.use_gpu)
+        # OCR disabled for memory optimization
+        logger.info("OCR functionality disabled for memory optimization")
         
         # Caption detection patterns
         self.CAPTION_PATTERNS = [
@@ -90,8 +90,8 @@ class FigureExtractor:
             return False
     
     def _is_ocr_available(self):
-        """Check if OCR is available"""
-        return self.ocr_manager.is_ocr_available()
+        """OCR disabled for memory optimization"""
+        return False
     
     async def extract(self, pdf_path: Path) -> List[Figure]:
         """
@@ -116,32 +116,21 @@ class FigureExtractor:
             except Exception as e:
                 logger.error(f"{method_name} extraction failed: {e}")
         
-        # Phase 2: Enhanced caption detection
-        candidates_with_captions = await self._detect_captions(candidates, pdf_path)
+        # Phase 2: Deduplicate and validate candidates
+        unique_candidates = self._deduplicate_candidates(candidates)
+        validated_candidates = [c for c in unique_candidates if self._validate_candidate(c)]
         
-        # Phase 3: Figure validation and filtering
-        validated_candidates = await self._validate_figure_candidates(candidates_with_captions, pdf_path)
+        # Phase 3: Convert to Figure objects
+        figures = []
+        for i, candidate in enumerate(validated_candidates):
+            try:
+                figure = self._create_figure_from_candidate(candidate, i)
+                figures.append(figure)
+            except Exception as e:
+                logger.warning(f"Failed to create figure from candidate {i}: {e}")
         
-        # Phase 4: OCR text extraction for LLM processing
-        ocr_enhanced_candidates = []
-        for candidate in validated_candidates:
-            # Try to extract OCR from saved image first
-            if candidate.image_path:
-                candidate = await self._extract_ocr_from_figure(candidate, pdf_path)
-            else:
-                # Fallback to extracting from PDF region
-                candidate = await self._extract_ocr_from_pdf_region(candidate, pdf_path)
-            ocr_enhanced_candidates.append(candidate)
-        
-        # Phase 5: Reference matching with text
-        enhanced_candidates = await self._match_text_references(ocr_enhanced_candidates, pdf_path)
-        
-        # Phase 6: Deduplication and ranking
-        final_figures = self._deduplicate_and_rank_figures(enhanced_candidates)
-        
-        logger.info(f"Final result: {len(final_figures)} validated figures from {len(candidates)} candidates")
-        
-        return final_figures
+        logger.info(f"Extracted {len(figures)} validated figures")
+        return figures
     
     async def _extract_with_pdffigures2(self, pdf_path: Path) -> List[FigureCandidate]:
         """Enhanced PDFFigures2 extraction with better error handling"""
@@ -1424,3 +1413,72 @@ class FigureExtractor:
             return 'diagram'
         else:
             return 'figure'
+    
+    def _deduplicate_candidates(self, candidates: List[FigureCandidate]) -> List[FigureCandidate]:
+        """Remove duplicate figure candidates based on bounding box overlap"""
+        if not candidates:
+            return []
+        
+        unique_candidates = []
+        for candidate in candidates:
+            is_duplicate = False
+            for existing in unique_candidates:
+                if self._calculate_overlap(candidate.bbox, existing.bbox) > 0.7:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                unique_candidates.append(candidate)
+        
+        return unique_candidates
+    
+    def _calculate_overlap(self, bbox1: BoundingBox, bbox2: BoundingBox) -> float:
+        """Calculate overlap ratio between two bounding boxes"""
+        x1 = max(bbox1.x1, bbox2.x1)
+        y1 = max(bbox1.y1, bbox2.y1)
+        x2 = min(bbox1.x2, bbox2.x2)
+        y2 = min(bbox1.y2, bbox2.y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (bbox1.x2 - bbox1.x1) * (bbox1.y2 - bbox1.y1)
+        area2 = (bbox2.x2 - bbox2.x1) * (bbox2.y2 - bbox2.y1)
+        
+        union = area1 + area2 - intersection
+        return intersection / union if union > 0 else 0.0
+    
+    def _validate_candidate(self, candidate: FigureCandidate) -> bool:
+        """Validate figure candidate based on size and aspect ratio"""
+        bbox = candidate.bbox
+        width = bbox.x2 - bbox.x1
+        height = bbox.y2 - bbox.y1
+        area = width * height
+        aspect_ratio = width / height if height > 0 else 0
+        
+        # Check area constraints
+        if area < self.MIN_FIGURE_AREA or area > self.MAX_FIGURE_AREA:
+            return False
+        
+        # Check aspect ratio constraints
+        if aspect_ratio < self.MIN_ASPECT_RATIO or aspect_ratio > self.MAX_ASPECT_RATIO:
+            return False
+        
+        return True
+    
+    def _create_figure_from_candidate(self, candidate: FigureCandidate, index: int) -> Figure:
+        """Create Figure object from validated candidate"""
+        return Figure(
+            id=f"figure_{candidate.page}_{index}",
+            label=candidate.label or f"Figure {candidate.page}.{index}",
+            caption=candidate.caption,
+            page=candidate.page,
+            bbox=candidate.bbox,
+            extraction_method=candidate.method,
+            confidence=candidate.confidence,
+            image_path=candidate.image_path,
+            # OCR functionality removed for memory optimization
+            ocr_text=None,
+            ocr_confidence=None
+        )

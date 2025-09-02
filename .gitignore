@@ -63,7 +63,6 @@ docker-compose.override.yml
 # Large files
 *.jar
 pdffigures2.jar
-models/
 
 # Test files
 test_*.pdf
