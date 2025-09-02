@@ -2,7 +2,7 @@
 import asyncio
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-import fitz  # PyMuPDF
+
 import pdfplumber
 import pandas as pd
 import cv2
@@ -17,17 +17,15 @@ from app.models.schemas import Table, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
 from app.services.cloudinary_service import cloudinary_service
-from app.services.extractors.camelot_extractor import camelot_extractor
+
 from app.services.extractors.tabula_extractor import tabula_extractor
 
 
 class TableExtractor:
     """
     Lightweight table extraction using rule-based methods only:
-    1. PDFPlumber (rule-based)
-    2. PyMuPDF (structure-based)
-    3. Camelot (fallback)
-    4. Tabula (fallback)
+    1. PDFPlumber (primary method)
+    2. Tabula (fallback only if PDFPlumber extracts 0 tables)
     
     AI models disabled for memory optimization
     """
@@ -51,7 +49,7 @@ class TableExtractor:
         
         all_tables = []
         
-        # Method 1: PDFPlumber (rule-based)
+        # Method 1: PDFPlumber (primary method)
         try:
             pdfplumber_tables = await self._extract_with_pdfplumber(pdf_path)
             all_tables.extend(pdfplumber_tables)
@@ -59,29 +57,16 @@ class TableExtractor:
         except Exception as e:
             logger.warning(f"PDFPlumber extraction failed: {e}")
         
-        # Method 2: PyMuPDF (structure-based)
-        try:
-            pymupdf_tables = await self._extract_with_pymupdf(pdf_path)
-            all_tables.extend(pymupdf_tables)
-            logger.info(f"PyMuPDF found {len(pymupdf_tables)} tables")
-        except Exception as e:
-            logger.warning(f"PyMuPDF extraction failed: {e}")
-        
-        # Method 3: Camelot (fallback)
-        try:
-            camelot_tables = await camelot_extractor.extract(pdf_path)
-            all_tables.extend(camelot_tables)
-            logger.info(f"Camelot found {len(camelot_tables)} tables")
-        except Exception as e:
-            logger.warning(f"Camelot extraction failed: {e}")
-        
-        # Method 4: Tabula (fallback)
-        try:
-            tabula_tables = await tabula_extractor.extract(pdf_path)
-            all_tables.extend(tabula_tables)
-            logger.info(f"Tabula found {len(tabula_tables)} tables")
-        except Exception as e:
-            logger.warning(f"Tabula extraction failed: {e}")
+        # Method 2: Tabula (fallback only if PDFPlumber extracts 0 tables)
+        if len(pdfplumber_tables) == 0:
+            try:
+                tabula_tables = await tabula_extractor.extract(pdf_path)
+                all_tables.extend(tabula_tables)
+                logger.info(f"Tabula fallback found {len(tabula_tables)} tables")
+            except Exception as e:
+                logger.warning(f"Tabula fallback extraction failed: {e}")
+        else:
+            logger.info("PDFPlumber extracted tables, skipping Tabula fallback")
         
         # Deduplicate and validate tables
         unique_tables = self._deduplicate_tables(all_tables)
@@ -121,26 +106,7 @@ class TableExtractor:
         
         return tables
     
-    async def _extract_with_pymupdf(self, pdf_path: Path) -> List[Table]:
-        """Extract tables using PyMuPDF"""
-        tables = []
-        try:
-            doc = fitz.open(str(pdf_path))
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                # Extract tables using PyMuPDF's table finder
-                tables_found = page.find_tables()
-                for table_idx, table_data in enumerate(tables_found):
-                    if self._is_valid_table_data(table_data):
-                        table = self._create_table_from_data(
-                            table_data, page_num + 1, table_idx, "pymupdf"
-                        )
-                        tables.append(table)
-            doc.close()
-        except Exception as e:
-            logger.error(f"PyMuPDF extraction failed: {e}")
-        
-        return tables
+
     
     def _is_valid_table_data(self, table_data) -> bool:
         """Check if table data is valid"""

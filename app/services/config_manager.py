@@ -49,8 +49,7 @@ class ExtractionConfig:
     table_transformer_weight: float = 0.8
     table_validation_threshold: float = 0.75
     
-    pdffigures2_enabled: bool = True
-    pdffigures2_weight: float = 0.9
+
     figure_validation_threshold: float = 0.7
     
     ocr_enabled: bool = True
@@ -235,8 +234,7 @@ class ConfigurationManager:
             
         elif profile_name == 'academic_paper':
             # Academic paper optimized
-            base_config.pdffigures2_enabled = True
-            base_config.pdffigures2_weight = 0.95
+            
             base_config.table_transformer_enabled = True
             base_config.target_quality = 0.8
             

@@ -70,7 +70,7 @@ class AdaptiveConfig:
             self.method_weights = {
                 "grobid": 0.9,
                 "table_transformer": 0.8,
-                "pdffigures2": 0.9,
+        
                 "cv_detection": 0.6,
                 "ocr_fallback": 0.5,
             }
@@ -100,7 +100,7 @@ class EnhancedExtractionHandler:
                 "last_failure": None,
                 "is_open": False,
             },
-            "pdffigures2": {"failures": 0, "last_failure": None, "is_open": False},
+    
         }
 
         # Initialize lazily (will be called when needed)
@@ -472,8 +472,7 @@ class EnhancedExtractionHandler:
         ):
             available_methods.append("table_transformer")
 
-        if not self._is_method_circuit_open("pdffigures2") and request.extract_figures:
-            available_methods.append("pdffigures2")
+
 
         # Run extraction
         try:
@@ -627,7 +626,7 @@ class EnhancedExtractionHandler:
         # If figure extraction failed, try different methods
         if "figure" in error_message.lower():
             logger.info("Figure extraction failed, using fallback methods")
-            self._record_method_failure("pdffigures2")
+    
 
         # General timeout errors - reduce scope
         if "timeout" in error_message.lower():

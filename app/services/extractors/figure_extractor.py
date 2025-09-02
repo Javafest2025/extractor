@@ -37,15 +37,13 @@ class FigureCandidate:
 
 class FigureExtractor:
     """
-    Enhanced multi-method figure extraction using PDFFigures2 as primary
-    and computer vision techniques as fallback with advanced validation
-    and OCR text extraction for LLM processing
+    Enhanced multi-method figure extraction using computer vision techniques
+    with advanced validation and OCR text extraction for LLM processing
     """
     
     def __init__(self, output_dir: Path = None):
         self.output_dir = output_dir or settings.paper_folder / "figures"
         self.output_dir.mkdir(exist_ok=True, parents=True)
-        self.pdffigures2_available = self._check_pdffigures2()
         
         # OCR disabled for memory optimization
         logger.info("OCR functionality disabled for memory optimization")
@@ -63,31 +61,7 @@ class FigureExtractor:
         self.MIN_ASPECT_RATIO = 0.2
         self.MAX_ASPECT_RATIO = 5.0
     
-    def _check_pdffigures2(self) -> bool:
-        """Check if PDFFigures2 is available"""
-        # If path is empty, PDFFigures2 is disabled
-        if not settings.pdffigures2_path:
-            logger.info("PDFFigures2 disabled, using fallback methods")
-            return False
-            
-        try:
-            # Check if it's a Docker command
-            if settings.pdffigures2_path.startswith("docker"):
-                result = subprocess.run(
-                    settings.pdffigures2_path.split() + ["-h"],
-                    capture_output=True,
-                    timeout=10
-                )
-            else:
-                result = subprocess.run(
-                    [settings.pdffigures2_path, "-h"],
-                    capture_output=True,
-                    timeout=5
-                )
-            return result.returncode == 0
-        except:
-            logger.warning("PDFFigures2 not available, using fallback methods")
-            return False
+
     
     def _is_ocr_available(self):
         """OCR disabled for memory optimization"""
@@ -95,26 +69,38 @@ class FigureExtractor:
     
     async def extract(self, pdf_path: Path) -> List[Figure]:
         """
-        Enhanced figure extraction with validation and caption detection
+        Enhanced figure extraction prioritizing PDFPlumber with CV contour fallback
         """
         candidates = []
         
-        # Phase 1: Extract candidates from multiple methods
-        extraction_methods = [
-            ('pdffigures2', self._extract_with_pdffigures2),
-            ('cv_detection', self._extract_with_cv_enhanced)
-        ]
-        
-        for method_name, method_func in extraction_methods:
-            if method_name == 'pdffigures2' and not self.pdffigures2_available:
-                continue
+        # Phase 1: Try PDFPlumber first (primary method)
+        try:
+            pdfplumber_candidates = await self._extract_with_pdfplumber(pdf_path)
+            candidates.extend(pdfplumber_candidates)
+            logger.info(f"PDFPlumber extracted {len(pdfplumber_candidates)} figure candidates")
+            
+            # Only use CV contour fallback if PDFPlumber extracts nothing
+            if len(pdfplumber_candidates) == 0:
+                logger.info("PDFPlumber extracted no figures, falling back to CV contour")
+                try:
+                    cv_candidates = await self._extract_with_cv_contour_only(pdf_path)
+                    candidates.extend(cv_candidates)
+                    logger.info(f"CV contour fallback extracted {len(cv_candidates)} figure candidates")
+                except Exception as e:
+                    logger.error(f"CV contour fallback extraction failed: {e}")
+            else:
+                logger.info("PDFPlumber extracted figures, skipping CV contour fallback")
                 
+        except Exception as e:
+            logger.error(f"PDFPlumber extraction failed: {e}")
+            # Fallback to CV contour if PDFPlumber completely fails
+            logger.info("PDFPlumber failed completely, falling back to CV contour")
             try:
-                method_candidates = await method_func(pdf_path)
-                candidates.extend(method_candidates)
-                logger.info(f"{method_name} extracted {len(method_candidates)} figure candidates")
+                cv_candidates = await self._extract_with_cv_contour_only(pdf_path)
+                candidates.extend(cv_candidates)
+                logger.info(f"CV contour fallback extracted {len(cv_candidates)} figure candidates")
             except Exception as e:
-                logger.error(f"{method_name} extraction failed: {e}")
+                logger.error(f"CV contour fallback extraction failed: {e}")
         
         # Phase 2: Deduplicate and validate candidates
         unique_candidates = self._deduplicate_candidates(candidates)
@@ -132,72 +118,250 @@ class FigureExtractor:
         logger.info(f"Extracted {len(figures)} validated figures")
         return figures
     
-    async def _extract_with_pdffigures2(self, pdf_path: Path) -> List[FigureCandidate]:
-        """Enhanced PDFFigures2 extraction with better error handling"""
-        output_prefix = self.output_dir / pdf_path.stem
-        
-        # Run PDFFigures2
-        if settings.pdffigures2_path.startswith("docker"):
-            cmd = settings.pdffigures2_path.split() + [
-                str(pdf_path),
-                "-m", str(output_prefix),
-                "-d", str(self.output_dir),
-                "-j", str(output_prefix) + ".json"
-            ]
-        else:
-            cmd = [
-                settings.pdffigures2_path,
-                str(pdf_path),
-                "-m", str(output_prefix),
-                "-d", str(self.output_dir),
-                "-j", str(output_prefix) + ".json"
-            ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            raise ExtractionError(f"PDFFigures2 failed: {stderr.decode()}")
-        
-        # Parse JSON output
-        json_path = Path(str(output_prefix) + ".json")
-        if not json_path.exists():
-            return []
-        
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-        
+
+    
+
+    
+    async def _extract_with_pdfplumber(self, pdf_path: Path) -> List[FigureCandidate]:
+        """Extract figures using PDFPlumber for high-quality image extraction"""
         candidates = []
-        for fig_data in data:
-            # Enhanced data extraction
-            region_boundary = fig_data.get('regionBoundary', {})
-            
-            candidate = FigureCandidate(
-                bbox=BoundingBox(
-                    x1=region_boundary.get('x1', 0),
-                    y1=region_boundary.get('y1', 0),
-                    x2=region_boundary.get('x2', 0),
-                    y2=region_boundary.get('y2', 0),
-                    page=fig_data.get('page', 1),
-                    confidence=0.9  # High confidence for PDFFigures2
-                ),
-                confidence=0.9,
-                method='pdffigures2',
-                image_path=fig_data.get('renderURL', ''),
-                caption=fig_data.get('caption', ''),
-                label=fig_data.get('name', ''),
-                page=fig_data.get('page', 1)
-            )
-            candidates.append(candidate)
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as pdf:
+                logger.info(f"PDFPlumber opened PDF with {len(pdf.pages)} pages")
+                for page_num, page in enumerate(pdf.pages, 1):
+                    # Extract images from page
+                    if hasattr(page, 'images') and page.images:
+                        logger.info(f"Page {page_num} has {len(page.images)} images")
+                        for img_idx, img_info in enumerate(page.images):
+                            try:
+                                # Create bounding box from image coordinates
+                                bbox = BoundingBox(
+                                    x1=img_info['x0'],
+                                    y1=img_info['top'],  # Use 'top' instead of 'y0'
+                                    x2=img_info['x1'],
+                                    y2=img_info['bottom'],  # Use 'bottom' instead of 'y1'
+                                    page=page_num,
+                                    confidence=0.9
+                                )
+                                
+                                # Save image locally using proper PDFPlumber method
+                                image_path = None
+                                if settings.store_locally:
+                                    # Store locally in organized folder structure
+                                    pdfplumber_dir = self.output_dir / "pdfplumber"
+                                    pdfplumber_dir.mkdir(parents=True, exist_ok=True)
+                                    img_path = pdfplumber_dir / f"page{page_num}_img{img_idx}.png"
+                                    
+                                    # Use proper PDFPlumber image extraction method
+                                    # Crop the page to the image region and convert to image
+                                    img_bbox = (img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom'])
+                                    cropped_region = page.crop(img_bbox)
+                                    table_img = cropped_region.to_image(resolution=300)  # Enhanced quality
+                                    
+                                    # Save as PNG with high quality
+                                    table_img.save(str(img_path), format="PNG", optimize=False)  # No compression for quality
+                                    
+                                    image_path = str(img_path)
+                                    logger.debug(f"Stored PDFPlumber image locally: {image_path}")
+                                else:
+                                    # Upload to Cloudinary
+                                    filename = f"pdfplumber_page{page_num}_img{img_idx}"
+                                    
+                                    # Create image for Cloudinary upload
+                                    img_bbox = (img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom'])
+                                    cropped_region = page.crop(img_bbox)
+                                    table_img = cropped_region.to_image(resolution=300)  # Enhanced quality
+                                    
+                                    # Convert to bytes for Cloudinary
+                                    import io
+                                    img_buffer = io.BytesIO()
+                                    table_img.save(img_buffer, format="PNG", optimize=False)  # No compression for quality
+                                    img_bytes = img_buffer.getvalue()
+                                    
+                                    image_path = await cloudinary_service.upload_image_from_bytes(
+                                        img_bytes, 
+                                        filename, 
+                                        "scholarai/figures"
+                                    )
+                                    logger.debug(f"Uploaded PDFPlumber image to Cloudinary: {image_path}")
+                                
+                                # Create candidate
+                                candidate = FigureCandidate(
+                                    bbox=bbox,
+                                    confidence=0.9,
+                                    method='pdfplumber',
+                                    image_path=image_path,
+                                    caption=self._extract_caption_near_image(page, img_info),
+                                    label=f"Figure {page_num}.{img_idx}",
+                                    page=page_num
+                                )
+                                candidates.append(candidate)
+                                
+                            except Exception as e:
+                                logger.warning(f"Failed to process image {img_idx} on page {page_num}: {e}")
+                    else:
+                        # Alternative: Try to extract images using page rendering
+                        logger.info(f"Page {page_num} has no images attribute, trying alternative method")
+                        # This will be handled by the PyMuPDF fallback
+                                
+        except Exception as e:
+            logger.error(f"PDFPlumber figure extraction failed: {e}")
+            # Fallback to PyMuPDF for image extraction
+            logger.info("Falling back to PyMuPDF for image extraction")
+            candidates.extend(await self._extract_images_with_pymupdf(pdf_path))
         
         return candidates
     
-
+    async def _extract_with_cv_contour_only(self, pdf_path: Path) -> List[FigureCandidate]:
+        """Extract figures using only CV contour detection (no charts)"""
+        candidates = []
+        try:
+            # Use PyMuPDF to get page images for CV processing
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                # Convert page to image for CV processing
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+                img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n
+                )
+                
+                if pix.n == 4:  # RGBA
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+                
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                
+                # Use only contour detection (no chart detection)
+                contour_candidates = await self._detect_figures_by_contours(img_array, gray, page_num + 1, page)
+                candidates.extend(contour_candidates)
+                
+                pix = None  # Free memory
+            
+            doc.close()
+            
+        except Exception as e:
+            logger.error(f"CV contour extraction failed: {e}")
+        
+        return candidates
+    
+    async def _extract_images_with_pymupdf(self, pdf_path: Path) -> List[FigureCandidate]:
+        """Fallback method to extract images using PyMuPDF if PDFPlumber fails"""
+        candidates = []
+        try:
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                image_list = page.get_images()
+                
+                for img_idx, img_info in enumerate(image_list):
+                    try:
+                        # Get image data
+                        xref = img_info[0]
+                        pix = fitz.Pixmap(doc, xref)
+                        
+                        if pix.n - pix.alpha < 4:  # Skip CMYK images
+                            # Convert to RGB
+                            pix = fitz.Pixmap(fitz.csRGB, pix)
+                        
+                        # Get image dimensions and position
+                        img_rect = page.get_image_bbox(img_info)
+                        
+                        # Create bounding box
+                        bbox = BoundingBox(
+                            x1=img_rect.x0,
+                            y1=img_rect.y0,
+                            x2=img_rect.x1,
+                            y2=img_rect.y1,
+                            page=page_num + 1,
+                            confidence=0.85
+                        )
+                        
+                        # Save image locally
+                        image_path = None
+                        if settings.store_locally:
+                            # Store locally in organized folder structure
+                            pymupdf_dir = self.output_dir / "pymupdf"
+                            pymupdf_dir.mkdir(parents=True, exist_ok=True)
+                            img_path = pymupdf_dir / f"page{page_num + 1}_img{img_idx}.png"
+                            
+                            # Save the image
+                            pix.save(str(img_path))
+                            image_path = str(img_path)
+                            logger.debug(f"Stored PyMuPDF image locally: {image_path}")
+                        else:
+                            # Upload to Cloudinary
+                            filename = f"pymupdf_page{page_num + 1}_img{img_idx}"
+                            # Convert pixmap to bytes for Cloudinary
+                            img_bytes = pix.tobytes("png")
+                            image_path = await cloudinary_service.upload_image_from_bytes(
+                                img_bytes, 
+                                filename, 
+                                "scholarai/figures"
+                            )
+                            logger.debug(f"Uploaded PyMuPDF image to Cloudinary: {image_path}")
+                        
+                        # Create candidate
+                        candidate = FigureCandidate(
+                            bbox=bbox,
+                            confidence=0.85,
+                            method='pymupdf',
+                            image_path=image_path,
+                            caption="",  # PyMuPDF doesn't provide caption context easily
+                            label=f"Figure {page_num + 1}.{img_idx}",
+                            page=page_num + 1
+                        )
+                        candidates.append(candidate)
+                        
+                        pix = None  # Free memory
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to process PyMuPDF image {img_idx} on page {page_num + 1}: {e}")
+            
+            doc.close()
+            
+        except Exception as e:
+            logger.error(f"PyMuPDF fallback image extraction failed: {e}")
+        
+        return candidates
+    
+    def _extract_caption_near_image(self, page, img_info: dict) -> str:
+        """Extract caption text near the image"""
+        try:
+            # Look for text near the image
+            img_x0, img_y0, img_x1, img_y1 = img_info['x0'], img_info['y0'], img_info['x1'], img_info['y1']
+            
+            # Search for text below or above the image
+            caption_text = ""
+            
+            # Check below image first
+            for word in page.extract_words():
+                word_x0, word_y0, word_x1, word_y1 = word['x0'], word['y0'], word['x1'], word['y1']
+                
+                # Check if word is below image (within reasonable distance)
+                if (word_y0 > img_y1 and word_y0 < img_y1 + 100 and
+                    abs(word_x0 - img_x0) < 50):
+                    caption_text += word['text'] + " "
+            
+            # If no text below, check above
+            if not caption_text.strip():
+                for word in page.extract_words():
+                    word_x0, word_y0, word_x1, word_y1 = word['x0'], word['y0'], word['x1'], word['y1']
+                    
+                    # Check if word is above image (within reasonable distance)
+                    if (word_y1 < img_y0 and word_y1 > img_y0 - 100 and
+                        abs(word_x0 - img_x0) < 50):
+                        caption_text += word['text'] + " "
+            
+            return caption_text.strip()
+            
+        except Exception as e:
+            logger.warning(f"Caption extraction failed: {e}")
+            return ""
     
     async def _extract_with_cv(self, pdf_path: Path) -> List[FigureCandidate]:
         """
@@ -437,17 +601,9 @@ class FigureExtractor:
         candidates = []
         height, width = img.shape[:2]
         
-        # Method 1: Contour-based detection
+        # Method 1: Contour-based detection only
         contour_candidates = await self._detect_figures_by_contours(img, gray, page_num, page)
         candidates.extend(contour_candidates)
-        
-        # Method 2: Template matching for common figure patterns
-        template_candidates = await self._detect_figures_by_templates(img, gray, page_num, page)
-        candidates.extend(template_candidates)
-        
-        # Method 3: Connected component analysis
-        component_candidates = await self._detect_figures_by_components(img, gray, page_num, page)
-        candidates.extend(component_candidates)
         
         return candidates
     
@@ -663,92 +819,9 @@ class FigureExtractor:
         
         return connected_regions
     
-    async def _detect_figures_by_templates(self, img: np.ndarray, gray: np.ndarray, 
-                                   page_num: int, page) -> List[FigureCandidate]:
-        """Detect figures using template patterns common in academic papers"""
-        candidates = []
-        
-        # CV Chart detection disabled - other methods are sufficient
-        # axis_candidates = await self._detect_chart_patterns(img, gray, page_num, page)
-        # candidates.extend(axis_candidates)
-        
-        # Template 2: Diagram patterns (geometric shapes)
-        diagram_candidates = self._detect_diagram_patterns(img, gray, page_num, page)
-        candidates.extend(diagram_candidates)
-        
-        return candidates
+
     
-    async def _detect_chart_patterns(self, img: np.ndarray, gray: np.ndarray, 
-                             page_num: int, page) -> List[FigureCandidate]:
-        """Detect chart/graph patterns with improved algorithm to avoid fragmentation"""
-        candidates = []
-        
-        # Look for perpendicular lines (axes)
-        edges = cv2.Canny(gray, 50, 150)
-        
-        # Detect horizontal and vertical lines
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-        
-        horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
-        vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
-        
-        # Find intersections (potential chart origins)
-        intersections = cv2.bitwise_and(horizontal_lines, vertical_lines)
-        
-        # Find regions around intersections
-        contours, _ = cv2.findContours(intersections, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Group nearby intersections to avoid fragmentation
-        chart_regions = self._group_chart_regions(contours, img.shape)
-        
-        for idx, (x, y, w, h) in enumerate(chart_regions):
-            area = w * h
-            
-            # Filter out very small fragments and ensure reasonable size
-            min_chart_area = 5000  # Minimum area for a chart (smaller than MIN_FIGURE_AREA)
-            
-            if (min_chart_area < area < self.MAX_FIGURE_AREA and
-                0.3 < w/h < 4.0):  # More flexible chart aspect ratio
-                
-                roi = img[y:y+h, x:x+w]
-                
-                if self._validate_chart_region(roi):
-                    # Skip CV chart images for now (they contain more text content than figures)
-                    # TODO: Improve chart detection to filter out text-heavy regions
-                    image_path = None
-                    if settings.store_locally:
-                        # Store locally in organized folder structure for analysis
-                        cv_chart_dir = self.output_dir / "cv_chart"
-                        cv_chart_dir.mkdir(parents=True, exist_ok=True)
-                        img_path = cv_chart_dir / f"page{page_num}_fig{idx}.png"
-                        cv2.imwrite(str(img_path), roi)
-                        image_path = str(img_path)
-                        logger.debug(f"Stored CV chart image locally (for analysis): {image_path}")
-                    else:
-                        # Skip upload for now
-                        logger.debug(f"Skipping CV chart image upload (text-heavy): page{page_num}_fig{idx}")
-                    
-                    scale = page.rect.width / img.shape[1]
-                    
-                    candidate = FigureCandidate(
-                        bbox=BoundingBox(
-                            x1=x * scale,
-                            y1=y * scale,
-                            x2=(x + w) * scale,
-                            y2=(y + h) * scale,
-                            page=page_num,
-                            confidence=0.75
-                        ),
-                        confidence=0.75,
-                        method='cv_chart',
-                        image_path=image_path,
-                        label=f"Chart {page_num}.{idx}",
-                        page=page_num
-                    )
-                    candidates.append(candidate)
-        
-        return candidates
+
     
     def _group_chart_regions(self, contours: List, img_shape: tuple) -> List[tuple]:
         """Group nearby chart intersections to avoid fragmentation"""
@@ -870,83 +943,9 @@ class FigureExtractor:
         # For now, return empty list
         return []
     
-    async def _detect_figures_by_components(self, img: np.ndarray, gray: np.ndarray, 
-                                    page_num: int, page) -> List[FigureCandidate]:
-        """Detect figures using connected component analysis"""
-        candidates = []
-        
-        # Threshold to create binary image
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Find connected components
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
-        
-        for i in range(1, num_labels):  # Skip background (label 0)
-            x, y, w, h, area = stats[i]
-            
-            if (self.MIN_FIGURE_AREA < area < self.MAX_FIGURE_AREA and
-                self.MIN_ASPECT_RATIO < w/h < self.MAX_ASPECT_RATIO):
-                
-                # Expand boundary to capture full figure including captions and labels
-                page_area = img.shape[0] * img.shape[1]
-                expanded_bbox = self._expand_figure_boundary(img, gray, x, y, w, h, page_area)
-                if expanded_bbox:
-                    x, y, w, h = expanded_bbox
-                
-                # Create mask for this component
-                component_mask = (labels == i).astype(np.uint8) * 255
-                
-                # Extract region
-                roi = img[y:y+h, x:x+w]
-                
-                if self._validate_component_region(roi, component_mask[y:y+h, x:x+w]):
-                    # CV component images are decent quality - upload them
-                    image_path = None
-                    if settings.store_locally:
-                        # Store locally in organized folder structure
-                        cv_component_dir = self.output_dir / "cv_component"
-                        cv_component_dir.mkdir(parents=True, exist_ok=True)
-                        img_path = cv_component_dir / f"page{page_num}_fig{i}.png"
-                        cv2.imwrite(str(img_path), roi)
-                        image_path = str(img_path)
-                        logger.debug(f"Stored CV component image locally: {image_path}")
-                    else:
-                        # Upload to Cloudinary
-                        filename = f"cv_component_page{page_num}_fig{i}"
-                        image_path = await cloudinary_service.upload_cv_image(roi, filename, "scholarai/figures")
-                        logger.debug(f"Uploaded CV component image to Cloudinary: {image_path}")
-                    
-                    scale = page.rect.width / img.shape[1]
-                    
-                    candidate = FigureCandidate(
-                        bbox=BoundingBox(
-                            x1=x * scale,
-                            y1=y * scale,
-                            x2=(x + w) * scale,
-                            y2=(y + h) * scale,
-                            page=page_num,
-                            confidence=0.65
-                        ),
-                        confidence=0.65,
-                        method='cv_component',
-                        image_path=image_path,
-                        label=f"Component {page_num}.{i}",
-                        page=page_num
-                    )
-                    candidates.append(candidate)
-        
-        return candidates
+
     
-    def _validate_component_region(self, roi: np.ndarray, mask: np.ndarray) -> bool:
-        """Validate connected component as potential figure"""
-        if roi.size == 0 or mask.size == 0:
-            return False
-        
-        # Check component density
-        mask_ratio = np.count_nonzero(mask) / mask.size
-        
-        # Good components have moderate density (not too sparse or dense)
-        return 0.1 <= mask_ratio <= 0.7
+
     
     def _validate_figure_region(self, roi: np.ndarray) -> bool:
         """General validation for figure regions with improved tolerance for expanded boundaries"""
@@ -1282,10 +1281,9 @@ class FigureExtractor:
     def _get_method_confidence_score(self, method: str) -> float:
         """Get confidence score based on extraction method"""
         method_scores = {
-            'pdffigures2': 0.9,
-            'cv_contour': 0.7,
-            'cv_chart': 0.75,
-            'cv_component': 0.6
+            'pdfplumber': 0.9,
+            'pymupdf': 0.85,
+            'cv_contour': 0.7
         }
         return method_scores.get(method, 0.5)
     

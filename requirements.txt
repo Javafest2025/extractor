@@ -11,7 +11,7 @@ pymupdf==1.23.22
 
 # Table Processing (Rule-based only)
 pandas==2.3.2
-camelot-py==1.0.9
+jpype1==1.5.1
 tabula-py==2.10.0
 
 # Document Processing

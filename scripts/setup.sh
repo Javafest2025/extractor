@@ -68,12 +68,7 @@ else
     echo "⚠ Tesseract OCR not found. Please install: sudo apt-get install tesseract-ocr"
 fi
 
-# Check Java (for PDFFigures2)
-if command -v java &> /dev/null; then
-    echo "✓ Java found: $(java -version 2>&1 | head -n1)"
-else
-    echo "⚠ Java not found. PDFFigures2 requires Java. Please install: sudo apt-get install default-jre"
-fi
+
 
 # Check Docker (for GROBID)
 if command -v docker &> /dev/null; then
@@ -96,12 +91,7 @@ else
     echo "⚠ Docker not found. GROBID service requires Docker."
 fi
 
-# Download PDFFigures2 if not present
-if [ ! -f "/usr/local/bin/pdffigures2.jar" ]; then
-    echo "Downloading PDFFigures2..."
-    wget https://github.com/allenai/pdffigures2/releases/download/v0.1.0/pdffigures2-0.1.0.jar -O pdffigures2.jar
-    echo "✓ PDFFigures2 downloaded. Move it to appropriate location or update config.py"
-fi
+
 
 # Create .env file if not exists
 if [ ! -f ".env" ]; then
@@ -120,7 +110,6 @@ API_PREFIX=/api/v1
 
 # External Services
 GROBID_URL=http://localhost:8070
-PDFFIGURES2_PATH=./pdffigures2.jar
 NOUGAT_MODEL_PATH=facebook/nougat-base
 
 # Storage

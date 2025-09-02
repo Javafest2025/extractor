@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     
     # External Services
     grobid_url: str = "http://localhost:8070"
-    pdffigures2_path: str = ""  # Disabled - using fallback methods (PyMuPDF + CV)
+
     nougat_model_path: str = ""  # DISABLED: Heavy AI model removed for memory optimization
     
     # Enrichment APIs

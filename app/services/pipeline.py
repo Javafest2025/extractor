@@ -1150,12 +1150,12 @@ class ExtractionPipeline:
             'text_fallback': 0.7,
             'transformer': 0.85,
             'pdfplumber': 0.8,
-            'camelot': 0.75,
+
             'tabula': 0.7,
-            'pdffigures2': 0.9,
+
             'cv_contour': 0.6,
-            'cv_component': 0.65,
-            'cv_chart': 0.5,
+
+    
             'nougat_tesseract': 0.8,
             'ocr_math': 0.7
         }
@@ -1189,7 +1189,7 @@ class ExtractionPipeline:
                 return min(1.0, total_text_length / 1000)  # Normalize by expected length
             return 0.5
         
-        elif method_name in ['transformer', 'pdfplumber', 'camelot', 'tabula']:
+        elif method_name in ['transformer', 'pdfplumber', 'tabula']:
             # Assess table quality
             tables = data if isinstance(data, list) else data.get('tables', [])
             if tables:
@@ -1199,7 +1199,7 @@ class ExtractionPipeline:
                 return valid_tables / len(tables) if tables else 0.0
             return 0.5
         
-        elif method_name in ['pdffigures2', 'cv_contour', 'cv_component', 'cv_chart']:
+        elif method_name in ['cv_contour']:
             # Assess figure quality
             figures = data if isinstance(data, list) else data.get('figures', [])
             if figures:

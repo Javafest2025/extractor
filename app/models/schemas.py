@@ -54,7 +54,7 @@ class Figure(BaseModel):
     ocr_confidence: Optional[float] = None  # OCR confidence score (0-1)
     
     # Enhanced extraction metadata
-    extraction_method: Optional[str] = None  # pdffigures2, pymupdf, cv_contour, etc.
+    extraction_method: Optional[str] = None  # pymupdf, cv_contour, etc.
     validation_scores: Optional[Dict[str, float]] = None  # validation metrics
     confidence: Optional[float] = None  # overall confidence score
 

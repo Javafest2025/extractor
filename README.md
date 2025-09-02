@@ -4,7 +4,7 @@ A robust, multi-method PDF extraction system designed to achieve near 100% extra
 
 ## Features
 
-- **Multi-Method Extraction**: Combines GROBID, PDFFigures2, Table Transformer, Nougat, Tesseract OCR, and computer vision techniques
+- **Multi-Method Extraction**: Combines GROBID, Table Transformer, Nougat, Tesseract OCR, and computer vision techniques
 - **Comprehensive Content Types**: Extracts text, figures, tables, equations, code blocks, references, and named entities
 - **High Accuracy**: Multiple extraction methods with intelligent fallback strategies
 - **OCR Support**: Automatic detection and processing of scanned PDFs
@@ -21,7 +21,7 @@ A robust, multi-method PDF extraction system designed to achieve near 100% extra
 - Paragraphs with page locations
 - References with metadata
 
-### 2. Figures (PDFFigures2 + PyMuPDF + CV)
+### 2. Figures (PyMuPDF + CV)
 - Figure detection and extraction
 - Caption extraction
 - Multi-method deduplication
@@ -58,7 +58,7 @@ A robust, multi-method PDF extraction system designed to achieve near 100% extra
 ### Prerequisites
 
 - Python 3.10+
-- Java (for PDFFigures2)
+
 - Docker (for GROBID)
 - Tesseract OCR
 
@@ -249,7 +249,7 @@ Edit `.env` file to configure:
 ```env
 # External Services
 GROBID_URL=http://localhost:8070
-PDFFIGURES2_PATH=./pdffigures2.jar
+
 NOUGAT_MODEL_PATH=facebook/nougat-base
 
 # Processing
@@ -268,7 +268,7 @@ KEEP_INTERMEDIATE_FILES=True
 The system uses these extraction methods in order of preference:
 
 1. **GROBID**: Primary method for text and structure
-2. **PDFFigures2**: Primary method for figures
+
 3. **Table Transformer**: Primary method for complex tables
 4. **Nougat**: Primary method for mathematical OCR
 5. **PyMuPDF**: Fallback for embedded content
@@ -364,7 +364,7 @@ Contributions are welcome! Please ensure:
 ## Acknowledgments
 
 - GROBID for scientific document parsing
-- Allen AI for PDFFigures2
+
 - Microsoft for Table Transformer
 - Meta for Nougat
 - All open-source contributors
