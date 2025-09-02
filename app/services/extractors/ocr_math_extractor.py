@@ -25,7 +25,7 @@ class OCRMathExtractor(BaseExtractor):
         self.nougat_available = False
         self.tesseract_available = False
         logger.info("OCR/Math extractor initialized (OCR disabled for memory optimization)")
-
+    
     async def extract(self, pdf_path: Path) -> Dict[str, Any]:
         """
         Extract mathematical formulas from pre-extracted text content.
@@ -112,7 +112,7 @@ class OCRMathExtractor(BaseExtractor):
                 equations.append(equation)
         
         return equations
-
+    
     def _validate_equation(self, equation: Equation) -> bool:
         """Validate extracted equation"""
         if not equation.text or len(equation.text.strip()) < 2:

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Storage Configuration
     store_locally: bool = True
     
+    # OCR Configuration
+    ocr_space_api_key: Optional[str] = None
+    use_ocr: bool = True
+    
     # RabbitMQ Configuration
     rabbitmq_host: str = "localhost"
     rabbitmq_port: int = 5672

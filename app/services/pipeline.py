@@ -892,6 +892,9 @@ class ExtractionPipeline:
         # Validate and correct page numbers
         corrected_result = await self._validate_page_numbers(corrected_result)
         
+        # Improve section page number accuracy
+        corrected_result = self._improve_section_page_accuracy(corrected_result)
+        
         return corrected_result
     
     async def _correct_table_false_positives(self, result: ExtractionResult, 
@@ -1076,6 +1079,64 @@ class ExtractionPipeline:
                         para['page'] = 1
                     elif total_pages > 0 and para['page'] > total_pages:
                         para['page'] = total_pages
+        
+        return result
+    
+    def _improve_section_page_accuracy(self, result: ExtractionResult) -> ExtractionResult:
+        """Improve section page number accuracy using paragraph content analysis"""
+        if not result.sections:
+            return result
+        
+        for section in result.sections:
+            if not section.paragraphs:
+                continue
+            
+            # Collect all valid page numbers from paragraphs
+            valid_page_numbers = []
+            for para in section.paragraphs:
+                if hasattr(para, 'page') and para.page > 0:
+                    valid_page_numbers.append(para.page)
+                elif isinstance(para, dict) and 'page' in para and para['page'] > 0:
+                    valid_page_numbers.append(para['page'])
+            
+            if not valid_page_numbers:
+                continue
+            
+            # Sort page numbers
+            valid_page_numbers.sort()
+            
+            # Calculate new page range
+            new_page_start = valid_page_numbers[0]
+            new_page_end = valid_page_numbers[-1]
+            
+            # Validate the new range
+            if new_page_end < new_page_start:
+                new_page_end = new_page_start
+            
+            # Check if the new range is more reasonable than the current one
+            current_span = section.page_end - section.page_start
+            new_span = new_page_end - new_page_start
+            
+            # If new range is significantly smaller and more reasonable, use it
+            if new_span < current_span and new_span <= 10:  # Most sections don't span more than 10 pages
+                section.page_start = new_page_start
+                section.page_end = new_page_end
+                logger.info(f"Updated section '{section.title}' page range from {current_span} to {new_span} pages")
+            
+            # Additional validation: if section spans too many pages, look for natural breaks
+            elif new_span > 10:
+                # Try to find a more reasonable range by looking for content concentration
+                page_counts = {}
+                for page_num in valid_page_numbers:
+                    page_counts[page_num] = page_counts.get(page_num, 0) + 1
+                
+                # Find the page with most content
+                if page_counts:
+                    most_content_page = max(page_counts, key=page_counts.get)
+                    # Limit range to ±2 pages around the most content-rich page
+                    section.page_start = max(1, most_content_page - 2)
+                    section.page_end = min(total_pages if hasattr(result.metadata, 'page_count') else 999, most_content_page + 2)
+                    logger.info(f"Limited section '{section.title}' page range to reasonable span around page {most_content_page}")
         
         return result
     

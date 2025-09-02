@@ -180,10 +180,10 @@ class TableExtractor:
         return Table(
             id=f"{method}_page{page_num}_table{table_idx}",
             label=f"Table {page_num}.{table_idx}",
-            page=page_num,
+                    page=page_num,
             bbox=bbox,
             headers=[headers] if headers else [],
-            rows=rows,
+                    rows=rows,
             extraction_method=method,
             csv_path=None,
             html=None,
@@ -229,11 +229,11 @@ class TableExtractor:
         try:
             # Generate unique filename
             filename = f"{table.extraction_method}_page{table.page}_table{table.id.split('_')[-1]}"
-        
+            
             # Create CSV file
             csv_path = self.output_dir / f"{filename}.csv"
             html_content = None
-        
+            
             try:
                 # Create DataFrame and save CSV
                 df = pd.DataFrame(table.rows, columns=table.headers[0] if table.headers else None)
@@ -257,7 +257,7 @@ class TableExtractor:
                     logger.info(f"Uploaded CSV to Cloudinary: {cloudinary_csv_url}")
             except Exception as e:
                 logger.warning(f"Failed to upload CSV to Cloudinary: {e}")
-                    
+                
             # Update table object with file paths
             table.csv_path = cloudinary_csv_url or str(csv_path)
             table.html = html_content
