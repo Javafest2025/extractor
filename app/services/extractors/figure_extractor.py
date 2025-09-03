@@ -171,7 +171,7 @@ class FigureExtractor:
                                     
                                     image_path = str(img_path)
                                     logger.debug(f"Stored PDFPlumber image locally: {image_path}")
-        else:
+                                else:
                                     # Upload to Cloudinary
                                     filename = f"pdfplumber_page{page_num}_img{img_idx}"
                                     
@@ -326,7 +326,7 @@ class FigureExtractor:
                             logger.debug(f"Uploaded PyMuPDF image to Cloudinary: {image_path}")
                         
                         # Create candidate
-            candidate = FigureCandidate(
+                        candidate = FigureCandidate(
                             bbox=bbox,
                             confidence=0.85,
                             method='pymupdf',
@@ -334,8 +334,8 @@ class FigureExtractor:
                             caption="",  # PyMuPDF doesn't provide caption context easily
                             label=f"Figure {page_num + 1}.{img_idx}",
                             page=page_num + 1
-            )
-            candidates.append(candidate)
+                        )
+                        candidates.append(candidate)
                         
                         pix = None  # Free memory
                         
