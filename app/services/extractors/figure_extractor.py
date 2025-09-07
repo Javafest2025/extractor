@@ -142,12 +142,27 @@ class FigureExtractor:
                         logger.info(f"Page {page_num} has {len(page.images)} images")
                         for img_idx, img_info in enumerate(page.images):
                             try:
+                                # Get page dimensions for validation
+                                page_width = page.width
+                                page_height = page.height
+                                
+                                # Clamp coordinates to page boundaries
+                                x1 = max(0, min(img_info['x0'], page_width))
+                                y1 = max(0, min(img_info['top'], page_height))
+                                x2 = max(0, min(img_info['x1'], page_width))
+                                y2 = max(0, min(img_info['bottom'], page_height))
+                                
+                                # Skip if bounding box is invalid (no area)
+                                if x1 >= x2 or y1 >= y2:
+                                    logger.warning(f"Skipping invalid bounding box for image {img_idx} on page {page_num}: ({x1}, {y1}, {x2}, {y2})")
+                                    continue
+                                
                                 # Create bounding box from image coordinates
                                 bbox = BoundingBox(
-                                    x1=img_info['x0'],
-                                    y1=img_info['top'],  # Use 'top' instead of 'y0'
-                                    x2=img_info['x1'],
-                                    y2=img_info['bottom'],  # Use 'bottom' instead of 'y1'
+                                    x1=x1,
+                                    y1=y1,
+                                    x2=x2,
+                                    y2=y2,
                                     page=page_num,
                                     confidence=0.9
                                 )

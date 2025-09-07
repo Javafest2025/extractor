@@ -237,9 +237,14 @@ class TableExtractor:
         # Clean up the DataFrame
         df = df.dropna(how='all').dropna(axis=1, how='all')
         
-        # Extract headers and rows
-        headers = df.iloc[0].tolist() if len(df) > 0 else []
-        rows = df.iloc[1:].values.tolist() if len(df) > 1 else []
+        # Extract headers and rows, ensuring no None values
+        headers = []
+        if len(df) > 0:
+            headers = [str(cell) if cell is not None else "" for cell in df.iloc[0].tolist()]
+        
+        rows = []
+        if len(df) > 1:
+            rows = [[str(cell) if cell is not None else "" for cell in row] for row in df.iloc[1:].values.tolist()]
         
         # Create bounding box (approximate)
         bbox = BoundingBox(

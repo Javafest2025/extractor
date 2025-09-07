@@ -131,6 +131,9 @@ class ExtractionMessageHandler(BaseMessageHandler):
                         return extraction_result
                     elif status_upper == 'PROCESSING':
                         logger.debug(f"🔄 Extraction still processing for job: {job_id}")
+                    elif status_upper == 'NOT_FOUND':
+                        logger.warning(f"❌ Extraction job not found: {job_id}")
+                        return None
                     else:
                         logger.warning(f"⚠️ Unknown extraction status '{status}' for job: {job_id}")
                 
