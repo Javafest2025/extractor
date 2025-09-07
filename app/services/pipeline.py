@@ -412,7 +412,7 @@ class ExtractionPipeline:
         # Find references in text
         for section in result.sections:
             for para in section.paragraphs:
-                text = para.get('text', '') if isinstance(para, dict) else para.text
+                text = para.get('text', '') if isinstance(para, dict) else getattr(para, 'text', str(para))
                 
                 # Find figure references
                 fig_patterns = [
@@ -485,7 +485,7 @@ class ExtractionPipeline:
         # Search in sections
         for section in result.sections:
             for para in section.paragraphs:
-                text = para.get('text', '') if isinstance(para, dict) else str(para.text)
+                text = para.get('text', '') if isinstance(para, dict) else str(getattr(para, 'text', para))
                 page = para.page if hasattr(para, 'page') else section.page_start
                 
                 # Find datasets
@@ -1144,7 +1144,7 @@ class ExtractionPipeline:
                     most_content_page = max(page_counts, key=page_counts.get)
                     # Limit range to ±2 pages around the most content-rich page
                     section.page_start = max(1, most_content_page - 2)
-                    section.page_end = min(total_pages if hasattr(result.metadata, 'page_count') else 999, most_content_page + 2)
+                    section.page_end = min(total_pages, most_content_page + 2)
                     logger.info(f"Limited section '{section.title}' page range to reasonable span around page {most_content_page}")
         
         return result
@@ -1193,7 +1193,8 @@ class ExtractionPipeline:
             sections = data.get('sections', [])
             if sections:
                 # Check for substantial content
-                total_text_length = sum(len(str(para.text if hasattr(para, 'text') else para.get('text', ''))) for section in sections 
+                total_text_length = sum(len(str(para.get('text', '') if isinstance(para, dict) else getattr(para, 'text', para))) 
+                                      for section in sections
                                       for para in section.paragraphs)
                 return min(1.0, total_text_length / 1000)  # Normalize by expected length
             return 0.5
@@ -1290,7 +1291,7 @@ class ExtractionPipeline:
                 text = para.get('text', '')
                 page = para.get('page', 0)
             else:
-                text = str(para.text if hasattr(para, 'text') else '')
+                text = str(getattr(para, 'text', para))
                 page = getattr(para, 'page', 0)
             
             text = text.strip()
