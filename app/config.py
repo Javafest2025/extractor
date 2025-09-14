@@ -7,13 +7,13 @@ from pathlib import Path
 class Settings(BaseSettings):
     """Application configuration settings (Memory Optimized)"""
     
-    # Application
+    # Application (hardcoded)
     app_name: str = "PDFExtractor"
     app_version: str = "1.0.0"
     debug: bool = False
     log_level: str = "INFO"
     
-    # API
+    # API (hardcoded)
     api_host: str = "0.0.0.0"
     api_port: int = 8002
     api_prefix: str = "/api/v1"
@@ -35,11 +35,11 @@ class Settings(BaseSettings):
     output_format: str = "json"
     keep_intermediate_files: bool = False  # Changed to False to save memory
     
-    # Processing (Memory Optimized)
-    max_workers: int = 2  # Reduced from 4
-    extraction_timeout: int = 180  # Reduced from 300
-    ocr_language: str = "eng"
-    use_gpu: bool = False  # Changed to False to avoid GPU memory issues
+    # Processing (hardcoded - only extraction_timeout is used)
+    # max_workers: int = 2  # Not used in code
+    extraction_timeout: int = 180  # Used in pipeline.py and main.py
+    # ocr_language: str = "eng"  # Not used in code
+    # use_gpu: bool = False  # Not used in code
     
     # OCR Configuration (Lightweight only)
     ocr_provider: str = "tesseract"  # Only Tesseract, no EasyOCR
@@ -50,9 +50,7 @@ class Settings(BaseSettings):
     enable_nougat_ocr: bool = False  # Disable Nougat OCR
     enable_easyocr: bool = False  # Disable EasyOCR
     
-    # Cache
-    redis_url: Optional[str] = None
-    cache_ttl: int = 1800  # Reduced from 3600
+    # Cache (not implemented - using in-memory storage)
     
     # RabbitMQ
     rabbitmq_user: Optional[str] = None
@@ -64,8 +62,7 @@ class Settings(BaseSettings):
     b2_bucket_name: Optional[str] = None
     b2_bucket_id: Optional[str] = None
     
-    # Gemini API
-    gemini_api_key: Optional[str] = None
+    # Gemini API not implemented
     
     # Cloudinary Configuration
     cloudinary_url: Optional[str] = None

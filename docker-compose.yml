@@ -7,16 +7,16 @@ services:
     env_file:
       - .env
     ports:
-      - "${API_PORT:-8002}:8002"
+      - "8002:8002"
     environment:
       - API_HOST=0.0.0.0
       - API_PORT=8002
-      - DEBUG=${DEBUG:-False}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG=False
+      - LOG_LEVEL=INFO
       - RABBITMQ_HOST=user-rabbitmq
       - RABBITMQ_PORT=5672
       - GROBID_URL=http://pdf_extractor_grobid:8070
-      - REDIS_URL=redis://user-redis:6379/0
+      # REDIS_URL removed - cache not implemented
       - HF_HOME=/app/cache/huggingface
       - TORCH_HOME=/app/cache/torch
       # Memory optimization: cap native/lib threads
