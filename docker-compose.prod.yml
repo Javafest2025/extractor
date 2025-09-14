@@ -4,6 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: scholar-extractor
+
+    # 🏷️ Add metadata labels for cleanup & observability
+    labels:
+      service: "extractor"
+      maintainer: "ScholarAI <dev@scholarai.local>"
+      version: "0.0.1-SNAPSHOT"
+      description: "PDF Extractor AI Agent for ScholarAI"
     env_file:
       - /opt/scholarai/envs/extractor.env
     ports:
