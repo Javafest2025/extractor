@@ -30,6 +30,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Stage 2: Runtime image
 FROM python:3.11-slim
 
+# ---- Metadata labels for cleanup & observability ----
+LABEL service="extractor" \
+      maintainer="ScholarAI <dev@scholarai.local>" \
+      version="0.0.1-SNAPSHOT" \
+      description="PDF Extractor AI Agent for ScholarAI"
+
 # Install only essential runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
