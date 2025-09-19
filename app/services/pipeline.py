@@ -19,7 +19,7 @@ from app.models.enums import EntityType
 from app.config import settings
 from app.services.extractors.grobid_extractor import GROBIDExtractor
 from app.services.extractors.figure_extractor import FigureExtractor
-from app.services.extractors.table_extractor import TableExtractor
+# from app.services.extractors.table_extractor import TableExtractor  # Disabled for efficiency
 from app.services.extractors.ocr_math_extractor import OCRMathExtractor
 from app.services.extractors.code_extractor import CodeExtractor
 from app.services.local_storage_service import local_storage_service
@@ -59,11 +59,13 @@ class ExtractionPipeline:
         except Exception as e:
             logger.warning(f"Enhanced figure extractor initialization failed: {e}")
         
-        try:
-            self.extractors['table'] = TableExtractor()
-            logger.info("Enhanced table extractor initialized")
-        except Exception as e:
-            logger.warning(f"Enhanced table extractor initialization failed: {e}")
+        # Table extraction disabled for efficiency
+        # try:
+        #     self.extractors['table'] = TableExtractor()
+        #     logger.info("Enhanced table extractor initialized")
+        # except Exception as e:
+        #     logger.warning(f"Enhanced table extractor initialization failed: {e}")
+        logger.info("Table extraction disabled for efficiency")
         
         try:
             self.extractors['ocr_math'] = OCRMathExtractor(output_dir=settings.paper_folder / "ocr_math")
@@ -168,10 +170,11 @@ class ExtractionPipeline:
                 self._safe_extract('figure', pdf_path)
             )
         
-        if request.extract_tables and 'table' in self.extractors:
-            tasks['tables'] = asyncio.create_task(
-                self._safe_extract('table', pdf_path)
-            )
+        # Table extraction disabled for efficiency
+        # if request.extract_tables and 'table' in self.extractors:
+        #     tasks['tables'] = asyncio.create_task(
+        #         self._safe_extract('table', pdf_path)
+        #     )
         
         if request.extract_code and 'code' in self.extractors:
             tasks['code'] = asyncio.create_task(
@@ -302,10 +305,11 @@ class ExtractionPipeline:
         extractor = self.extractors['figure']
         return await extractor.extract(pdf_path)
     
-    async def _extract_tables(self, pdf_path: Path) -> List[Table]:
-        """Extract tables"""
-        extractor = self.extractors['table']
-        return await extractor.extract(pdf_path)
+    # Table extraction disabled for efficiency
+    # async def _extract_tables(self, pdf_path: Path) -> List[Table]:
+    #     """Extract tables"""
+    #     extractor = self.extractors['table']
+    #     return await extractor.extract(pdf_path)
     
     async def _extract_code(self, pdf_path: Path) -> List[CodeBlock]:
         """Extract code blocks"""

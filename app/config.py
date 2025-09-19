@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     
     # Storage Configuration
     store_locally: bool = True
+    upload_figures_to_cloud: bool = True       # upload at the end
+    upload_concurrency: int = 6                # parallel Cloudinary uploads
+    cloudinary_figures_folder: str = "scholarai/figures"
     
     # OCR Configuration
     ocr_space_api_key: Optional[str] = None

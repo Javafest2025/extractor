@@ -17,8 +17,10 @@ import io
 from app.models.schemas import Figure, BoundingBox
 from app.config import settings
 from app.utils.exceptions import ExtractionError
-# OCR functionality removed for memory optimization
 from app.services.cloudinary_service import cloudinary_service
+# OCR functionality removed for memory optimization
+
+FIGURE_UPLOAD_METHODS = {"pdfplumber", "cv_contour", "chart_axes", "chart_axes_grouped"}
 from app.services.ocr.ocr_manager import OCRManager
 
 
@@ -34,6 +36,8 @@ class FigureCandidate:
     page: int = 1
     ocr_text: Optional[str] = None  # OCR extracted text from the image
     ocr_confidence: Optional[float] = None  # OCR confidence score
+    page_width: Optional[float] = None  # Page width for validation
+    page_height: Optional[float] = None  # Page height for validation
 
 
 class FigureExtractor:
@@ -60,11 +64,14 @@ class FigureExtractor:
             r'(\d+)\.\s*([^.]*(?:\.[^.]*){0,2})',  # 1. Caption (when near figure)
         ]
         
-        # Figure validation thresholds
-        self.MIN_FIGURE_AREA = 5000  # Minimum area in pixels²
+        # Figure validation thresholds - made more strict
+        self.MIN_FIGURE_AREA = 15000  # Minimum area in pixels² (increased from 5000)
         self.MAX_FIGURE_AREA = 500000  # Maximum area in pixels²
         self.MIN_ASPECT_RATIO = 0.2
         self.MAX_ASPECT_RATIO = 5.0
+        self.MIN_FIGURE_WIDTH = 100  # Minimum width in points
+        self.MIN_FIGURE_HEIGHT = 50  # Minimum height in points
+        self.MAX_STRIP_ASPECT_RATIO = 20  # Reject very thin strips
     
 
     
@@ -74,55 +81,124 @@ class FigureExtractor:
                 self.ocr_manager.is_any_provider_available() and 
                 settings.use_ocr)
     
+    async def _bulk_upload_final_figures(self, figures: List[Figure]) -> None:
+        """
+        Upload final validated figure images concurrently.
+        - Only uploads local paths (not already URLs).
+        - Updates figure.image_path in-place to the Cloudinary URL on success.
+        """
+        if not settings.upload_figures_to_cloud:
+            return
+
+        # filter: only eligible methods, path exists, not already a URL
+        to_upload = []
+        for f in figures:
+            if (f.extraction_method in FIGURE_UPLOAD_METHODS and
+                isinstance(f.image_path, str) and
+                f.image_path and not f.image_path.startswith("http")):
+                to_upload.append(f)
+
+        if not to_upload:
+            return
+
+        sem = asyncio.Semaphore(settings.upload_concurrency)
+
+        async def _upload_one(fig: Figure):
+            path = Path(fig.image_path)
+            if not path.exists():
+                return
+            async with sem:
+                try:
+                    # mirror method into subfolder to keep things tidy
+                    folder = f"{settings.cloudinary_figures_folder}/{fig.extraction_method}"
+                    # Upload file to Cloudinary
+                    url = await cloudinary_service.upload_file(str(path), folder=folder)
+                    if url:
+                        fig.image_path = url  # replace local path with cloud URL
+                        logger.debug(f"Uploaded figure -> {url}")
+                except Exception as e:
+                    logger.warning(f"Upload failed for {path.name}: {e}")
+
+        await asyncio.gather(*[_upload_one(f) for f in to_upload])
+    
     async def extract(self, pdf_path: Path) -> List[Figure]:
         """
-        Enhanced figure extraction prioritizing PDFPlumber with CV contour fallback
+        Run PDFPlumber + enhanced CV (contours + axes) on every file, then dedupe/validate.
+        This ensures vector charts & multi-panels (not embedded as images) are found.
         """
-        candidates = []
+        candidates: List[FigureCandidate] = []
         
-        # Phase 1: Try PDFPlumber first (primary method)
+        # Phase 1: PDFPlumber (embedded images)
         try:
             pdfplumber_candidates = await self._extract_with_pdfplumber(pdf_path)
             candidates.extend(pdfplumber_candidates)
             logger.info(f"PDFPlumber extracted {len(pdfplumber_candidates)} figure candidates")
-            
-            # Only use CV contour fallback if PDFPlumber extracts nothing
-            if len(pdfplumber_candidates) == 0:
-                logger.info("PDFPlumber extracted no figures, falling back to CV contour")
-                try:
-                    cv_candidates = await self._extract_with_cv_contour_only(pdf_path)
-                    candidates.extend(cv_candidates)
-                    logger.info(f"CV contour fallback extracted {len(cv_candidates)} figure candidates")
-                except Exception as e:
-                    logger.error(f"CV contour fallback extraction failed: {e}")
-            else:
-                logger.info("PDFPlumber extracted figures, skipping CV contour fallback")
-                
         except Exception as e:
             logger.error(f"PDFPlumber extraction failed: {e}")
-            # Fallback to CV contour if PDFPlumber completely fails
-            logger.info("PDFPlumber failed completely, falling back to CV contour")
-            try:
-                cv_candidates = await self._extract_with_cv_contour_only(pdf_path)
-                candidates.extend(cv_candidates)
-                logger.info(f"CV contour fallback extracted {len(cv_candidates)} figure candidates")
-            except Exception as e:
-                logger.error(f"CV contour fallback extraction failed: {e}")
+            
+        # Phase 2: Enhanced CV (ALWAYS) — runs contours + axes/legend + panel merge
+        try:
+            cv_candidates = await self._extract_with_cv_enhanced(pdf_path)
+            candidates.extend(cv_candidates)
+            # quick method breakdown for sanity
+            by_method = {}
+            for c in cv_candidates:
+                by_method[c.method] = by_method.get(c.method, 0) + 1
+            logger.info(f"Enhanced CV extracted {len(cv_candidates)} candidates: {by_method}")
+        except Exception as e:
+            logger.error(f"Enhanced CV extraction failed: {e}")
+
+        if not candidates:
+            logger.info("No candidates found by any method")
+            return []
+
+        # Phase 3: Add captions for CV-only candidates (so validation can use text too)
+        try:
+            candidates = await self._detect_captions(candidates, pdf_path)
+        except Exception as e:
+            logger.warning(f"Caption detection phase failed: {e}")
         
-        # Phase 2: Deduplicate and validate candidates
+        # Phase 4: Dedup + validate + boost
         unique_candidates = self._deduplicate_candidates(candidates)
         validated_candidates = [c for c in unique_candidates if self._validate_candidate(c)]
+        validated_candidates = self._boost_chart_confidence(validated_candidates)
         
-        # Phase 3: Convert to Figure objects
-        figures = []
+        # Phase 5: Build final objects
+        figures: List[Figure] = []
         for i, candidate in enumerate(validated_candidates):
             try:
-                figure = self._create_figure_from_candidate(candidate, i)
+                # ensure image exists now
+                if not candidate.image_path:
+                    candidate.image_path = self._materialize_image_from_pdf(pdf_path, candidate)
+
+                figure = Figure(
+                    id=f"figure_{candidate.page}_{i}",
+                    label=candidate.label or f"Figure {candidate.page}.{i}",
+                    caption=candidate.caption,
+                    page=candidate.page,
+                    bbox=candidate.bbox,
+                    extraction_method=candidate.method,
+                    confidence=candidate.confidence,
+                    image_path=candidate.image_path,
+                    ocr_text=candidate.ocr_text,
+                    ocr_confidence=candidate.ocr_confidence
+                )
                 figures.append(figure)
             except Exception as e:
                 logger.warning(f"Failed to create figure from candidate {i}: {e}")
         
-        logger.info(f"Extracted {len(figures)} validated figures")
+        logger.info(
+            "Final figures: total=%d (methods=%s)",
+            len(figures),
+            {f.extraction_method for f in figures}
+        )
+
+        # NEW: bulk upload at the end
+        try:
+            await self._bulk_upload_final_figures(figures)
+        except Exception as e:
+            logger.warning(f"Bulk upload step failed: {e}")
+
         return figures
     
 
@@ -146,23 +222,61 @@ class FigureExtractor:
                                 page_width = page.width
                                 page_height = page.height
                                 
-                                # Clamp coordinates to page boundaries
-                                x1 = max(0, min(img_info['x0'], page_width))
-                                y1 = max(0, min(img_info['top'], page_height))
-                                x2 = max(0, min(img_info['x1'], page_width))
-                                y2 = max(0, min(img_info['bottom'], page_height))
+                                # Extract original coordinates
+                                x0, top, x1, bottom = img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom']
                                 
-                                # Skip if bounding box is invalid (no area)
-                                if x1 >= x2 or y1 >= y2:
-                                    logger.warning(f"Skipping invalid bounding box for image {img_idx} on page {page_num}: ({x1}, {y1}, {x2}, {y2})")
+                                # Check if image is completely or mostly outside page bounds
+                                if (x1 <= 0 or x0 >= page_width or 
+                                    bottom <= 0 or top >= page_height or
+                                    x0 < -50 or x1 < -50 or  # Reject images starting far outside
+                                    top < -50 or bottom < -50):
+                                    logger.debug(f"Skipping out-of-bounds image {img_idx} on page {page_num}: bounds ({x0:.1f}, {top:.1f}, {x1:.1f}, {bottom:.1f}) vs page ({page_width:.1f}, {page_height:.1f})")
                                     continue
                                 
-                                # Create bounding box from image coordinates
+                                # Calculate dimensions before clamping to validate size
+                                orig_width = abs(x1 - x0)
+                                orig_height = abs(bottom - top)
+                                orig_area = orig_width * orig_height
+                                
+                                # Apply strict size filters before processing
+                                if (orig_width < self.MIN_FIGURE_WIDTH or 
+                                    orig_height < self.MIN_FIGURE_HEIGHT or
+                                    orig_area < self.MIN_FIGURE_AREA):
+                                    logger.debug(f"Skipping small image {img_idx} on page {page_num}: size {orig_width:.1f}x{orig_height:.1f} (area: {orig_area:.0f})")
+                                    continue
+                                
+                                # Check for very thin strips (likely artifacts)
+                                aspect_ratio = orig_width / orig_height if orig_height > 0 else float('inf')
+                                if aspect_ratio > self.MAX_STRIP_ASPECT_RATIO or aspect_ratio < (1/self.MAX_STRIP_ASPECT_RATIO):
+                                    logger.debug(f"Skipping strip-like image {img_idx} on page {page_num}: aspect ratio {aspect_ratio:.2f}")
+                                    continue
+                                
+                                # Clamp coordinates to page boundaries (for processing valid images)
+                                clamped_x1 = max(0, min(x0, page_width))
+                                clamped_y1 = max(0, min(top, page_height))
+                                clamped_x2 = max(0, min(x1, page_width))
+                                clamped_y2 = max(0, min(bottom, page_height))
+                                
+                                # Skip if clamping resulted in invalid box
+                                if clamped_x1 >= clamped_x2 or clamped_y1 >= clamped_y2:
+                                    logger.debug(f"Skipping image {img_idx} on page {page_num}: invalid box after clamping")
+                                    continue
+                                
+                                # Check if clamping significantly reduced the image size
+                                clamped_width = clamped_x2 - clamped_x1
+                                clamped_height = clamped_y2 - clamped_y1
+                                size_retention = (clamped_width * clamped_height) / orig_area
+                                
+                                if size_retention < 0.7:  # Lost more than 30% of original size
+                                    logger.debug(f"Skipping image {img_idx} on page {page_num}: too much size lost in clamping ({size_retention:.2f})")
+                                    continue
+                                
+                                # Create bounding box from clamped coordinates
                                 bbox = BoundingBox(
-                                    x1=x1,
-                                    y1=y1,
-                                    x2=x2,
-                                    y2=y2,
+                                    x1=clamped_x1,
+                                    y1=clamped_y1,
+                                    x2=clamped_x2,
+                                    y2=clamped_y2,
                                     page=page_num,
                                     confidence=0.9
                                 )
@@ -177,7 +291,16 @@ class FigureExtractor:
                                     
                                     # Use proper PDFPlumber image extraction method
                                     # Crop the page to the image region and convert to image
-                                    img_bbox = (img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom'])
+                                    # Use clamped coordinates for cropping to ensure we stay within page bounds
+                                    img_bbox = (clamped_x1, clamped_y1, clamped_x2, clamped_y2)
+                                    # Expand bbox to include nearby text (titles, captions, legends)
+                                    img_bbox = self._expand_bbox_with_nearby_text_pdfplumber(page, img_bbox)
+                                    # Add small padding to avoid tight cuts on labels/colorbars
+                                    x0, y0, x1, y1 = img_bbox
+                                    w, h = x1-x0, y1-y0
+                                    pad = max(3, int(0.03 * max(w, h)))  # 3% padding
+                                    img_bbox = (max(0, x0-pad), max(0, y0-pad), 
+                                               min(page.width, x1+pad), min(page.height, y1+pad))
                                     cropped_region = page.crop(img_bbox)
                                     table_img = cropped_region.to_image(resolution=300)  # Enhanced quality
                                     
@@ -191,7 +314,16 @@ class FigureExtractor:
                                     filename = f"pdfplumber_page{page_num}_img{img_idx}"
                                     
                                     # Create image for Cloudinary upload
-                                    img_bbox = (img_info['x0'], img_info['top'], img_info['x1'], img_info['bottom'])
+                                    # Use clamped coordinates for cropping to ensure we stay within page bounds
+                                    img_bbox = (clamped_x1, clamped_y1, clamped_x2, clamped_y2)
+                                    # Expand bbox to include nearby text (titles, captions, legends)
+                                    img_bbox = self._expand_bbox_with_nearby_text_pdfplumber(page, img_bbox)
+                                    # Add small padding to avoid tight cuts on labels/colorbars
+                                    x0, y0, x1, y1 = img_bbox
+                                    w, h = x1-x0, y1-y0
+                                    pad = max(3, int(0.03 * max(w, h)))  # 3% padding
+                                    img_bbox = (max(0, x0-pad), max(0, y0-pad), 
+                                               min(page.width, x1+pad), min(page.height, y1+pad))
                                     cropped_region = page.crop(img_bbox)
                                     table_img = cropped_region.to_image(resolution=300)  # Enhanced quality
                                     
@@ -229,7 +361,9 @@ class FigureExtractor:
                                     label=f"Figure {page_num}.{img_idx}",
                                     page=page_num,
                                     ocr_text=ocr_text,  # Store OCR extracted text from the figure
-                                    ocr_confidence=0.8 if ocr_text else None
+                                    ocr_confidence=0.8 if ocr_text else None,
+                                    page_width=page_width,  # Add page dimensions for validation
+                                    page_height=page_height
                                 )
                                 candidates.append(candidate)
                                 
@@ -639,14 +773,16 @@ class FigureExtractor:
         
         height, width = img.shape[:2]
         
-        # Size validation
+        # Apply strict size validation
         area = width * height
-        if area < self.MIN_FIGURE_AREA or area > self.MAX_FIGURE_AREA:
+        if (area < self.MIN_FIGURE_AREA or area > self.MAX_FIGURE_AREA or
+            width < self.MIN_FIGURE_WIDTH or height < self.MIN_FIGURE_HEIGHT):
             return False
         
-        # Aspect ratio validation
+        # Aspect ratio validation with strip detection
         aspect_ratio = width / height
-        if aspect_ratio < self.MIN_ASPECT_RATIO or aspect_ratio > self.MAX_ASPECT_RATIO:
+        if (aspect_ratio < self.MIN_ASPECT_RATIO or aspect_ratio > self.MAX_ASPECT_RATIO or
+            aspect_ratio > self.MAX_STRIP_ASPECT_RATIO or aspect_ratio < (1/self.MAX_STRIP_ASPECT_RATIO)):
             return False
         
         # Convert to grayscale for analysis
@@ -775,85 +911,462 @@ class FigureExtractor:
                                           page_num: int, page) -> List[FigureCandidate]:
         """Multi-scale approach for figure detection"""
         candidates = []
-        height, width = img.shape[:2]
         
-        # Method 1: Contour-based detection only
+        # 1) Contours (good for photos/heatmaps)
         contour_candidates = await self._detect_figures_by_contours(img, gray, page_num, page)
         candidates.extend(contour_candidates)
+
+        # 2) Axes/legend-based chart detection (line plots, multi-panels)
+        chart_candidates = self._detect_charts_with_axes(img, gray, page_num, page)
+        candidates.extend(chart_candidates)
+
+        # 3) Merge aligned subpanels into one figure (A/B/C/D layouts)
+        candidates = self._merge_panels_by_alignment(candidates, page)
         
         return candidates
     
     async def _detect_figures_by_contours(self, img: np.ndarray, gray: np.ndarray, 
                                   page_num: int, page) -> List[FigureCandidate]:
-        """Detect figures using contour analysis"""
+        """Detect figures using contour analysis with clustering and content snapping"""
         candidates = []
-        
-        # Enhanced edge detection
         edges = cv2.Canny(gray, 30, 100)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3,3)))
         
-        # Morphological operations to connect nearby edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        height, width = img.shape[:2]
-        page_area = width * height
-        
-        for idx, contour in enumerate(contours):
-            # Get bounding box
+        H, W = img.shape[:2]
+        page_area = W * H
+
+        raw_boxes = []
+        for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
             area = w * h
-            
-            # Filter by size and proportion
-            if (self.MIN_FIGURE_AREA < area < min(self.MAX_FIGURE_AREA, page_area * 0.4) and
-                self.MIN_ASPECT_RATIO < w/h < self.MAX_ASPECT_RATIO):
-                
-                # Expand boundary to capture full figure including captions and labels
-                expanded_bbox = self._expand_figure_boundary(img, gray, x, y, w, h, page_area)
-                if expanded_bbox:
-                    x, y, w, h = expanded_bbox
-                
-                # Extract region for validation
-                roi = img[y:y+h, x:x+w]
-                
-                if self._validate_figure_region(roi):
-                    # CV contour images are good quality - upload them
-                    image_path = None
-                    if settings.store_locally:
-                        # Store locally in organized folder structure
-                        cv_contour_dir = self.output_dir / "cv_contour"
-                        cv_contour_dir.mkdir(parents=True, exist_ok=True)
-                        img_path = cv_contour_dir / f"page{page_num}_fig{idx}.png"
-                        cv2.imwrite(str(img_path), roi)
-                        image_path = str(img_path)
-                        logger.debug(f"Stored CV contour image locally: {image_path}")
-                    else:
-                        # Upload to Cloudinary
-                        filename = f"cv_contour_page{page_num}_fig{idx}"
-                        image_path = await cloudinary_service.upload_cv_image(roi, filename, "scholarai/figures")
-                        logger.debug(f"Uploaded CV contour image to Cloudinary: {image_path}")
-                    
-                    # Convert coordinates to PDF space
-                    scale = page.rect.width / width
-                    
-                    candidate = FigureCandidate(
+            ar = w / h if h > 0 else 999
+
+            if (area > self.MIN_FIGURE_AREA and
+                area < min(self.MAX_FIGURE_AREA, 0.6 * page_area) and
+                self.MIN_ASPECT_RATIO < ar < self.MAX_ASPECT_RATIO and
+                1/self.MAX_STRIP_ASPECT_RATIO <= ar <= self.MAX_STRIP_ASPECT_RATIO):
+                raw_boxes.append((x, y, w, h))
+
+        # Merge nearby fragments
+        merged = self._cluster_boxes(raw_boxes, gap=40)
+
+        # Snap merged boxes to content to cover full figure
+        snapped = [self._snap_to_content(gray, x, y, w, h) for (x, y, w, h) in merged]
+
+        # Create candidates (no file I/O yet)
+        scale = page.rect.width / W
+        for i, (x, y, w, h) in enumerate(snapped):
+            roi = img[y:y+h, x:x+w]
+            if not self._validate_figure_region(roi):
+                continue
+
+            cand = FigureCandidate(
+                bbox=BoundingBox(
+                    x1=x*scale, y1=y*scale, x2=(x+w)*scale, y2=(y+h)*scale,
+                    page=page_num, confidence=0.78
+                ),
+                confidence=0.78,
+                method='cv_contour',
+                image_path=None,  # defer saving
+                label=f"Figure {page_num}.contour{i}",
+                page=page_num,
+                page_width=page.rect.width,
+                page_height=page.rect.height
+            )
+            candidates.append(cand)
+
+        return candidates
+    
+    def _rects_intersect(self, a, b):
+        """Check if two rectangles intersect"""
+        ax, ay, aw, ah = a; bx, by, bw, bh = b
+        return not (ax+aw < bx or bx+bw < ax or ay+ah < by or by+bh < ay)
+
+    def _cluster_boxes(self, boxes, gap=35):
+        """
+        Cluster overlapping/nearby boxes and return merged (x,y,w,h) boxes.
+        Works in raster (page image) space.
+        """
+        merged = []
+        for b in sorted(boxes, key=lambda r: r[2]*r[3], reverse=True):
+            x,y,w,h = b
+            merged_flag = False
+            for i,(X,Y,W,H) in enumerate(merged):
+                # near or overlapping?
+                if not (x > X+W+gap or X > x+w+gap or y > Y+H+gap or Y > y+h+gap):
+                    nx, ny = min(x,X), min(y,Y)
+                    nx2, ny2 = max(x+w, X+W), max(y+h, Y+H)
+                    merged[i] = (nx, ny, nx2-nx, ny2-ny)
+                    merged_flag = True
+                    break
+            if not merged_flag:
+                merged.append(b)
+        return merged
+
+    def _snap_to_content(self, gray, x, y, w, h):
+        """
+        Grow a box to cover the whole figure by snapping to non-white content
+        (and small gaps) using local threshold + morphology.
+        """
+        H, W = gray.shape[:2]
+        pad = int(0.25 * max(w, h))
+        x0 = max(0, x - pad); y0 = max(0, y - pad)
+        x1 = min(W, x + w + pad); y1 = min(H, y + h + pad)
+        crop = gray[y0:y1, x0:x1]
+        if crop.size == 0:
+            return (x, y, w, h)
+
+        # binary content mask (invert = content is white->0, ink->1)
+        # Otsu works well across mixed backgrounds
+        _, binv = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # close small gaps and join nearby pieces
+        binv = cv2.morphologyEx(binv, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (9,9)), iterations=2)
+        binv = cv2.dilate(binv, cv2.getStructuringElement(cv2.MORPH_RECT, (5,5)), iterations=1)
+
+        cnts, _ = cv2.findContours(binv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return (x, y, w, h)
+
+        # keep only contours that intersect the original (shifted) box
+        keep = []
+        orig = (x - x0, y - y0, w, h)
+        for c in cnts:
+            rx, ry, rw, rh = cv2.boundingRect(c)
+            if self._rects_intersect((rx, ry, rw, rh), orig):
+                keep.append((rx, ry, rw, rh))
+
+        if not keep:
+            return (x, y, w, h)
+
+        nx = min(k[0] for k in keep)
+        ny = min(k[1] for k in keep)
+        nx2 = max(k[0]+k[2] for k in keep)
+        ny2 = max(k[1]+k[3] for k in keep)
+        nx += x0; ny += y0
+        nw = nx2 + x0 - nx
+        nh = ny2 + y0 - ny
+
+        # clamp to page
+        nx = max(0, nx); ny = max(0, ny)
+        nw = min(W - nx, nw); nh = min(H - ny, nh)
+        return (nx, ny, nw, nh)
+
+    def _overlap_ratio(self, a0, a1, b0, b1):
+        """Calculate overlap ratio between two intervals"""
+        inter = max(0, min(a1, b1) - max(a0, b0))
+        return inter / max(1e-5, (a1 - a0))
+
+    def _expand_bbox_with_nearby_text_pdfplumber(self, page, img_bbox):
+        """Expand bbox to include nearby text blocks (titles, captions, legends)"""
+        x0, y0, x1, y1 = img_bbox
+        w, h = x1-x0, y1-y0
+        pad = max(6, int(0.04 * max(w, h)))
+        X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(page.width, x1 + pad), min(page.height, y1 + pad)
+
+        words = page.extract_words(extra_attrs=["size"])
+        # coalesce words into rough blocks (same line)
+        lines = {}
+        for wobj in words:
+            key = int(wobj["top"] // max(6, wobj["height"]))
+            lines.setdefault(key, []).append(wobj)
+
+        blocks = []
+        for _, group in lines.items():
+            xs0 = min(g["x0"] for g in group); xs1 = max(g["x1"] for g in group)
+            ys0 = min(g["top"] for g in group); ys1 = max(g["bottom"] for g in group)
+            text = " ".join(g["text"] for g in sorted(group, key=lambda z: z["x0"]))
+            blocks.append((xs0, ys0, xs1, ys1, text))
+
+        # heuristics: title above, caption below, legend right
+        for bx0, by0, bx1, by1, text in blocks:
+            v_overlap = self._overlap_ratio(by0, by1, y0, y1)
+            h_overlap = self._overlap_ratio(bx0, bx1, x0, x1)
+
+            # Title: above, good horizontal overlap
+            if by1 <= y0 and (y0 - by1) < 0.30*h and h_overlap > 0.55:
+                X0, Y0, X1, Y1 = min(X0, bx0), min(Y0, by0), max(X1, bx1), max(Y1, by1)
+
+            # Caption: below, good horizontal overlap (also catches "Fig. …")
+            if by0 >= y1 and (by0 - y1) < 0.40*h and h_overlap > 0.55:
+                X0, Y0, X1, Y1 = min(X0, bx0), min(Y0, by0), max(X1, bx1), max(Y1, by1)
+
+            # Legend: to the right, decent vertical overlap
+            if bx0 >= x1 and (bx0 - x1) < 0.60*w and v_overlap > 0.35:
+                X0, Y0, X1, Y1 = min(X0, bx0), min(Y0, by0), max(X1, bx1), max(Y1, by1)
+
+        return (max(0, X0), max(0, Y0), min(page.width, X1), min(page.height, Y1))
+
+    def _non_orthogonal_edge_ratio(self, gray):
+        """Calculate ratio of non-orthogonal edges (charts have more diagonal/curved lines than text)"""
+        edges = cv2.Canny(gray, 60, 160)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        ang = np.abs(np.arctan2(gy, gx))  # 0..pi
+        mask = edges > 0
+        if not np.any(mask): return 0.0
+        # count angles that are NOT near 0 or 90 deg (text is mostly orthogonal)
+        non_ortho = ((ang[mask] > np.deg2rad(15)) & (ang[mask] < np.deg2rad(75))).sum()
+        return non_ortho / float(mask.sum())
+
+    def _is_mostly_text_region(self, gray):
+        """Detect if region is mostly text (paragraphs) vs. chart content"""
+        # Otsu + CC stats: paragraphs = many tiny components + strong orthogonal edge bias
+        _, binv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        num, _, stats, _ = cv2.connectedComponentsWithStats(binv)
+        if num <= 1: return False
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        small = (areas < 120).sum() / max(1, len(areas))
+        # orthogonal edge ratio
+        edges = cv2.Canny(gray, 60, 160)
+        lines = cv2.HoughLines(edges, 1, np.pi/180, 60)
+        ortho = 0
+        if lines is not None:
+            for r,theta in lines[:,0]:
+                a = abs(theta % (np.pi/2))
+                if (a < np.deg2rad(10)) or (abs(a - np.pi/2) < np.deg2rad(10)):
+                    ortho += 1
+        ortho_ratio = ortho / max(1, len(lines[:,0])) if lines is not None else 0
+        return (small > 0.65) and (ortho_ratio > 0.75)
+
+    def _materialize_image_from_pdf(self, pdf_path: Path, cand: "FigureCandidate") -> Optional[str]:
+        """
+        Create/save the image for a validated candidate.
+        Uses PDF coords (points) to render a high-res crop.
+        """
+        try:
+            import fitz
+            page_index = cand.page - 1
+            rect = fitz.Rect(cand.bbox.x1, cand.bbox.y1, cand.bbox.x2, cand.bbox.y2)
+            doc = fitz.open(str(pdf_path))
+            page = doc[page_index]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect)
+
+            if settings.store_locally:
+                out_dir = self.output_dir / cand.method
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / f"page{cand.page}_fig{hash((cand.bbox.x1, cand.bbox.y1, cand.bbox.x2, cand.bbox.y2)) & 0xffff}.png"
+                pix.save(str(path))
+                doc.close()
+                return str(path)
+            else:
+                img_bytes = pix.tobytes("png")
+                doc.close()
+                return asyncio.get_event_loop().run_until_complete(
+                    cloudinary_service.upload_image_from_bytes(img_bytes, f"page{cand.page}_fig", "scholarai/figures")
+                )
+        except Exception as e:
+            logger.warning(f"Failed to materialize image: {e}")
+            return None
+    
+    def _detect_charts_with_axes(self, img: np.ndarray, gray: np.ndarray, 
+                                page_num: int, page) -> List[FigureCandidate]:
+        """Detect charts by finding rectangular plotting areas with axes and legends"""
+        H, W = gray.shape[:2]
+        edges = cv2.Canny(gray, 60, 160)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
+
+        # Find long near-horizontal & near-vertical lines (axes & borders)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=120, minLineLength=min(W,H)//5, maxLineGap=10)
+        rects = []
+        if lines is not None:
+            # cluster lines by angle; build rectangles from perpendicular pairs
+            horiz, vert = [], []
+            for x1,y1,x2,y2 in lines[:,0]:
+                ang = abs(np.arctan2(y2-y1, x2-x1))
+                if ang < np.deg2rad(10): horiz.append((x1,y1,x2,y2))
+                elif abs(ang - np.pi/2) < np.deg2rad(10): vert.append((x1,y1,x2,y2))
+
+            # brute pair rectangles from line extremes
+            if horiz and vert:
+                xs = [x for x,_,x2,_ in vert] + [x2 for x,_,x2,_ in vert]
+                ys = [y for _,y,_,y2 in horiz] + [y2 for _,y,_,y2 in horiz]
+                if xs and ys:
+                    # coarse grid cells (captures A/B/C/D panels)
+                    xs = sorted(xs); ys = sorted(ys)
+                    for i in range(0, len(xs)-1):
+                        for j in range(0, len(ys)-1):
+                            x1, x2 = xs[i], xs[i+1]
+                            y1, y2 = ys[j], ys[j+1]
+                            w, h = x2-x1, y2-y1
+                            if w>80 and h>60:   # min size for a panel
+                                rects.append((x1,y1,w,h))
+
+        # Validate rectangles as "plot areas"
+        chart_boxes = []
+        for (x,y,w,h) in rects:
+            roi = img[y:y+h, x:x+w]
+            if roi.size == 0: 
+                continue
+            g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            border = edges[y:y+h, x:x+w]
+
+            score = 0
+            # ticks: many short collinear segments along bottom/left edges
+            tick_density = (np.sum(border[:5,:]>0) + np.sum(border[-5:,:]>0) +
+                            np.sum(border[:,:5]>0) + np.sum(border[:,-5:]>0)) / (2*w + 2*h + 1)
+            if tick_density > 0.05: score += 1
+
+            # moderate edge density inside plot
+            ed = np.count_nonzero(border)/border.size
+            if 0.02 <= ed <= 0.35: score += 1
+
+            # NEW: "not a paragraph"
+            if not self._is_mostly_text_region(g): score += 1
+
+            # NEW: there should be a non-orthogonal signal (lines/curves of data)
+            if self._non_orthogonal_edge_ratio(g) > 0.12: score += 1
+
+            # hints of legend: small colored lines + adjacent text to the right or inside
+            legend_ok = self._heuristic_legend_hint(img, x, y, w, h)
+            if legend_ok: score += 1
+
+            if score >= 4:
+                # expand a bit to include labels/colorbars
+                pad = int(0.08*max(w,h))
+                bx, by = max(0,x-pad), max(0,y-pad)
+                bw, bh = min(W-bx, w+2*pad), min(H-by, h+2*pad)
+                chart_boxes.append((bx,by,bw,bh))
+
+        # Merge overlapping/nearby plot boxes (panels)
+        merged = self._merge_boxes(chart_boxes, gap=25)
+
+        cands = []
+        scale = page.rect.width / W
+        for i,(x,y,w,h) in enumerate(merged):
+            # Grow to full figure boundary
+            x,y,w,h = self._snap_to_content(gray, x, y, w, h)
+
+            cands.append(FigureCandidate(
                         bbox=BoundingBox(
-                            x1=x * scale,
-                            y1=y * scale,
-                            x2=(x + w) * scale,
-                            y2=(y + h) * scale,
-                            page=page_num,
-                            confidence=0.7
-                        ),
-                        confidence=0.7,
-                        method='cv_contour',
-                        image_path=image_path,
-                        label=f"Figure {page_num}.{idx}",
-                        page=page_num
+                    x1=x*scale, y1=y*scale, x2=(x+w)*scale, y2=(y+h)*scale,
+                    page=page_num, confidence=0.85
+                ),
+                confidence=0.85,
+                method='chart_axes',
+                image_path=None,           # defer saving
+                label=f"Figure {page_num}.chart{i}",
+                page=page_num,
+                page_width=page.rect.width,
+                page_height=page.rect.height
+            ))
+        return cands
+    
+    def _merge_boxes(self, boxes, gap=20):
+        """Simple NMS-like merge of overlapping/nearby rectangles"""
+        out = []
+        for b in sorted(boxes, key=lambda r:r[2]*r[3], reverse=True):
+            x,y,w,h = b
+            merged = False
+            for k,(X,Y,W,H) in enumerate(out):
+                if not (x> X+W+gap or X> x+w+gap or y> Y+H+gap or Y> y+h+gap):
+                    # merge
+                    nx = min(x,X); ny=min(y,Y)
+                    nx_max = max(x+w, X+W); ny_max = max(y+h, Y+H)
+                    out[k] = (nx,ny,nx_max-nx,ny_max-ny)
+                    merged = True
+                    break
+            if not merged: out.append(b)
+        return out
+
+    def _heuristic_legend_hint(self, img, x, y, w, h):
+        """Look slightly right/top of the plot for short colored line segments + texty region"""
+        H, W = img.shape[:2]
+        rx1 = min(W-1, x+w+5); ry1 = max(0, y-5)
+        rx2 = min(W-1, x+w+int(0.35*w)); ry2 = min(H-1, y+h+int(0.35*h))
+        if rx2<=rx1 or ry2<=ry1: return False
+        region = img[ry1:ry2, rx1:rx2]
+        if region.size == 0: return False
+        # lots of small edges but low paragraph density ~ legend bullets
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        ed = np.count_nonzero(cv2.Canny(gray, 60, 160))/gray.size
+        text_like = self._estimate_text_content(gray)
+        return ed>0.03 and text_like<0.7
+
+    
+    def _merge_panels_by_alignment(self, candidates, page, align_tol=12):
+        """Merge aligned subpanels into single figures (A/B/C/D layouts)"""
+        # group by row/col alignment in page space
+        merged = []
+        used = set()
+        
+        # Separate contour and chart candidates for IoU checking
+        contour_candidates = [c for c in candidates if c.method == 'cv_contour']
+        chart_candidates = [c for c in candidates if c.method == 'chart_axes']
+        
+        for i,a in enumerate(candidates):
+            if i in used: continue
+            group = [a]
+            for j,b in enumerate(candidates):
+                if j in used or i==j: continue
+                if abs(a.bbox.y1 - b.bbox.y1)<align_tol or abs(a.bbox.x1 - b.bbox.x1)<align_tol:
+                    group.append(b); used.add(j)
+            if len(group)>=2:
+                x1=min(g.bbox.x1 for g in group); y1=min(g.bbox.y1 for g in group)
+                x2=max(g.bbox.x2 for g in group); y2=max(g.bbox.y2 for g in group)
+                
+                # Check if grouped region has IoU with any contour candidate (≥0.25)
+                has_contour_overlap = False
+                for contour_cand in contour_candidates:
+                    iou = self._calculate_bbox_iou(
+                        BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2, page=a.page),
+                        contour_cand.bbox
                     )
-                    candidates.append(candidate)
+                    if iou >= 0.25:
+                        has_contour_overlap = True
+                        break
+                
+                # Only keep grouped regions that overlap with contour candidates
+                if has_contour_overlap:
+                    merged.append(FigureCandidate(
+                        bbox=BoundingBox(
+                            x1=x1,
+                            y1=y1,
+                            x2=x2,
+                            y2=y2,
+                            page=a.page,
+                            confidence=max(g.bbox.confidence for g in group),
+                        ),
+                        confidence=max(g.confidence for g in group),
+                        method='chart_axes_grouped',
+                        image_path=None,
+                        label=f"Figure {a.page}.grid",
+                        page=a.page,
+                        page_width=a.page_width,
+                        page_height=a.page_height,
+                    ))
+                    used.update({i})
+                else:
+                    # If no contour overlap, add individual candidates back
+                    for g in group:
+                        if g not in merged:
+                            merged.append(g)
+            else:
+                merged.append(a)
+        return merged
+    
+    def _boost_chart_confidence(self, candidates: List[FigureCandidate]) -> List[FigureCandidate]:
+        """Boost confidence for figures with chart-specific text tokens"""
+        CHART_TOKENS = {
+            "TP fraction", "Number of pairs", "iteration", "Random", "DCA", "Hung.", 
+            "Orthology", "Distance", "Mirrortree", "amino-acid", "DCA score", 
+            "Rank of", "Average", "training set", "species", "mutation", "chain"
+        }
+        
+        for candidate in candidates:
+            # Check caption text
+            if candidate.caption:
+                caption_lower = candidate.caption.lower()
+                if any(token.lower() in caption_lower for token in CHART_TOKENS):
+                    candidate.confidence += 0.05
+                    logger.debug(f"Boosted confidence for chart-like caption: {candidate.label}")
+            
+            # Check OCR text
+            if candidate.ocr_text:
+                ocr_lower = candidate.ocr_text.lower()
+                if any(token.lower() in ocr_lower for token in CHART_TOKENS):
+                    candidate.confidence += 0.05
+                    logger.debug(f"Boosted confidence for chart-like OCR text: {candidate.label}")
         
         return candidates
     
@@ -979,7 +1492,7 @@ class FigureExtractor:
         _, binary = cv2.threshold(search_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
         # Find connected components
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary)
         
         for i in range(1, num_labels):  # Skip background
             cx, cy, cw, ch, area = stats[i]
@@ -1117,6 +1630,7 @@ class FigureExtractor:
         """Detect diagram patterns with geometric shapes"""
         # This method can be expanded based on specific diagram types
         # For now, return empty list
+        _ = img, gray, page_num, page  # Suppress unused parameter warnings
         return []
     
 
@@ -1459,7 +1973,9 @@ class FigureExtractor:
         method_scores = {
             'pdfplumber': 0.9,
             'pymupdf': 0.85,
-            'cv_contour': 0.7
+            'cv_contour': 0.7,
+            'chart_axes': 0.88,
+            'chart_axes_grouped': 0.9,
         }
         return method_scores.get(method, 0.5)
     
@@ -1624,19 +2140,28 @@ class FigureExtractor:
         return intersection / union if union > 0 else 0.0
     
     def _validate_candidate(self, candidate: FigureCandidate) -> bool:
-        """Validate figure candidate based on size and aspect ratio"""
+        """Validate figure candidate using page-relative thresholds (robust to DPI/page size)"""
         bbox = candidate.bbox
-        width = bbox.x2 - bbox.x1
-        height = bbox.y2 - bbox.y1
-        area = width * height
-        aspect_ratio = width / height if height > 0 else 0
-        
-        # Check area constraints
-        if area < self.MIN_FIGURE_AREA or area > self.MAX_FIGURE_AREA:
+        w = bbox.x2 - bbox.x1
+        h = bbox.y2 - bbox.y1
+        if w <= 0 or h <= 0:
+            return False
+
+        # Page-relative thresholds (robust to dpi / page size)
+        page_w = candidate.page_width or 612  # fallback A4/letter-ish
+        page_h = candidate.page_height or 792
+        page_area = page_w * page_h
+        area = w * h
+        ar = w / h
+
+        # Allow 0.5%–85% of page area for a single figure (multi-panels included)
+        if not (0.005 * page_area <= area <= 0.85 * page_area):
+            logger.debug(f"Candidate validation failed: area {area:.0f} not in range [{0.005 * page_area:.0f}, {0.85 * page_area:.0f}]")
             return False
         
-        # Check aspect ratio constraints
-        if aspect_ratio < self.MIN_ASPECT_RATIO or aspect_ratio > self.MAX_ASPECT_RATIO:
+        # Aspect ratio guardrails (very long strips rejected)
+        if ar < 0.15 or ar > 6.0:
+            logger.debug(f"Candidate validation failed: aspect ratio {ar:.2f} not in range [0.15, 6.0]")
             return False
         
         return True
